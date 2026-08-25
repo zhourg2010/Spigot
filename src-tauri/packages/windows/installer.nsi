@@ -915,8 +915,8 @@ Section Install
 
   ; Remove stale window-state files
   DetailPrint "Removing window-state.json / .window-state.json"
-  Delete "$APPDATA\io.github.clash-verge-rev.clash-verge-rev\window-state.json"
-  Delete "$APPDATA\io.github.clash-verge-rev.clash-verge-rev\.window-state.json"
+  Delete "$APPDATA\io.github.zhourg2010.rclash\window-state.json"
+  Delete "$APPDATA\io.github.zhourg2010.rclash\.window-state.json"
 
   ; Clean legacy auto-launch registry entries
   StrCpy $R1 "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1089,8 +1089,8 @@ Section Uninstall
   ; Remove cached window state files
   DetailPrint "Removing window-state.json / .window-state.json"
   SetShellVarContext current
-  Delete "$APPDATA\io.github.clash-verge-rev.clash-verge-rev\window-state.json"
-  Delete "$APPDATA\io.github.clash-verge-rev.clash-verge-rev\.window-state.json"
+  Delete "$APPDATA\io.github.zhourg2010.rclash\window-state.json"
+  Delete "$APPDATA\io.github.zhourg2010.rclash\.window-state.json"
 
   ; Clean legacy auto-launch registry entries
   StrCpy $R1 "Software\Microsoft\Windows\CurrentVersion\Run"

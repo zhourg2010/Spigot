@@ -288,7 +288,7 @@ fn sibling_swap_path(destination: &Path, label: &str) -> PathBuf {
     let name = destination
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("Clash Verge.app");
+        .unwrap_or("rClash.app");
     destination.with_file_name(format!(".{name}.{label}-{}", std::process::id()))
 }
 

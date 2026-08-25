@@ -8,8 +8,10 @@ use std::process::{Command, Output};
 use windows::Win32::Globalization::{GetACP, GetOEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const TASK_NAME_USER: &str = "Clash Verge";
-const TASK_NAME_ADMIN: &str = "Clash Verge (Admin)";
+// 计划任务名在系统里是全局唯一的键。必须跟上游区分开,否则 rClash 和已经装着的
+// Clash Verge Rev 会互相覆盖对方的开机自启任务。
+const TASK_NAME_USER: &str = "rClash";
+const TASK_NAME_ADMIN: &str = "rClash (Admin)";
 const TASK_XML_DIR: &str = "tasks";
 const TASK_XML_USER: &str = "clash-verge-task-user.xml";
 const TASK_XML_ADMIN: &str = "clash-verge-task-admin.xml";
