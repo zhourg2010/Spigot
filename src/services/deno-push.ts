@@ -32,7 +32,9 @@ import {
   writeTextFile,
 } from '@tauri-apps/plugin-fs'
 import { fetch } from '@tauri-apps/plugin-http'
-import yaml from 'js-yaml'
+// 必须是 * as,不能是默认导入:js-yaml 5.x 的 ESM 构建只有具名导出,没有 default。
+// 仓库里其余 5 处用的也都是这个写法(见 proxies-editor-viewer.tsx 等)。
+import * as yaml from 'js-yaml'
 import { getProxies } from 'tauri-plugin-mihomo-api'
 
 // ---------------------------------------------------------------- 设置
