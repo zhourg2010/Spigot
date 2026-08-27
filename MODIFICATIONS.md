@@ -1,15 +1,21 @@
-# 本目录的来源与改动说明
+# rClash 的来源与改动说明
 
 ## 来源
 
-本目录是 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) 的源码副本，
+本仓库是 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) 的源码副本，
 基于上游 **v2.5.4**（commit `a1dae06`，2026-08-23）。
 
-原作者版权与许可证见同目录下的 `LICENSE`（**GNU GPL-3.0-only**）。本副本沿用同一许可证。
+原作者版权与许可证见仓库根目录的 `LICENSE`（**GNU GPL-3.0-only**）。本副本沿用同一许可证。
 
 ## 为什么是复制而不是 fork
 
-纯个人使用，不打算发布，也不打算把改动提交回上游，所以直接复制源码而没有建立 fork 关系。
+纯个人使用，不打算把改动提交回上游，所以直接复制源码而没有建立 fork 关系。
+
+## 迁移记录（2026-08-27）
+
+这份源码原来住在 [nodes-sub](https://github.com/zhourg2010/nodes-sub) 的 `client/` 子目录里，
+2026-08-27 用 `git subtree split` 抽出来独立成仓库，三条提交的历史都保留着。
+nodes-sub 那边的 `client/` 和 `build-client.yml` 已经删掉，只在 README 里留了一句指路。
 
 ## 改动内容（2026-08-24）
 
@@ -24,7 +30,7 @@
 | `src/components/proxy/deno-push-button.tsx` | 新增 | 按钮和设置面板 |
 | `src/services/deno-push.test.ts` | 新增 | 单元测试 |
 | `src/components/proxy/proxy-head.tsx` | **修改（+5 行）** | 一句 import + 三行渲染按钮 |
-| `.github/workflows/` | 删除 | 上游自己的发布/签名/公证/更新器/TG 通知流程，自用不需要。<br>本项目的构建流程在仓库根目录 `.github/workflows/build-client.yml` |
+| `.github/workflows/` | 替换 | 上游自己的发布/签名/公证/更新器/TG 通知流程，自用不需要，全部删掉。<br>本仓库的构建流程是新写的 `.github/workflows/build.yml` |
 
 除此之外没有改动上游代码。
 
@@ -90,7 +96,6 @@ git clone --depth 1 --branch <新版本tag> \
   https://github.com/clash-verge-rev/clash-verge-rev /tmp/cvr-new
 
 # 2. 先把自己的改动存成补丁(注意:改名之后要带的文件比原来多,见上面那张表)
-cd client
 git diff HEAD -- src/components/proxy/proxy-head.tsx \
   src-tauri/tauri.conf.json src-tauri/tauri.windows.conf.json src/index.html package.json \
   src-tauri/src/utils/dirs.rs src-tauri/src/utils/schtasks.rs src-tauri/src/utils/init.rs \
@@ -130,13 +135,12 @@ pnpm i && pnpm typecheck && pnpm test && pnpm lint
 
 ## 构建
 
-见仓库根目录的 `.github/workflows/build-client.yml`。打 `client-v*` 的 tag 会自动出
-macOS（Apple 芯片 / Intel）、Windows、Linux 的包并发 Release。
+见 `.github/workflows/build.yml`。打 `v*` 的 tag 会自动出 macOS（Apple 芯片 / Intel）、
+Windows、Linux 的包并发 Release；推 main 只构建，产物挂在那次运行的 Artifacts 里。
 
 本地构建：
 
 ```bash
-cd client
 pnpm i
 pnpm run prebuild <目标平台三元组>   # 下载 mihomo 内核 sidecar
 pnpm build

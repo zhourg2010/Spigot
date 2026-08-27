@@ -1,3 +1,31 @@
+# rClash
+
+**这是 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) 的自用修改版**
+（基于上游 v2.5.4），不是官方版本，上游作者对它不负任何责任、也没有为它背书。
+
+改了什么、为什么这么改、怎么同步上游新版本 —— 全部写在 **[MODIFICATIONS.md](./MODIFICATIONS.md)** 里。
+一句话版本:代理页测延迟按钮旁边多了个「一键推送美国节点到自建 Deno 订阅服务」的按钮，
+另外把应用名/ID/计划任务名改成了 rClash，好跟机器上已经装着的 Clash Verge Rev 并存互不打架。
+
+许可证跟上游一致:**GNU GPL-3.0-only**,见 [LICENSE](./LICENSE)。
+
+## 下载
+
+打 `v*` 的 tag 会自动构建并发 Release（macOS Apple 芯片 / macOS Intel / Windows / Linux）。
+**没有做代码签名**,首次打开 macOS 要右键→打开,Windows 的 SmartScreen 要点「仍要运行」。
+
+## 本地构建
+
+```bash
+pnpm i
+pnpm run prebuild <目标平台三元组>   # 下载 mihomo 内核 sidecar
+pnpm build
+```
+
+---
+
+以下是**上游 Clash Verge Rev 的原始 README**,原样保留:
+
 <h1 align="center">
   <img src="./src-tauri/icons/icon.png" alt="Clash" width="128" />
   <br>

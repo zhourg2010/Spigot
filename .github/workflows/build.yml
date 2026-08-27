@@ -1,0 +1,199 @@
+# 构建 rClash,出 macOS(Apple 芯片 / Intel)、Windows、Linux 四个包。
+#
+# 触发方式:
+#   - 打 tag v*             → 构建并发一个 GitHub Release
+#   - 推 main               → 只构建,产物挂在这次运行的 Artifacts 里
+#   - 手动跑(workflow_dispatch)→ 同上;勾了 release 才发布
+#
+# 这份配置是从 nodes-sub 仓库的 .github/workflows/build-client.yml 搬过来的。那边源码在
+# client/ 子目录里,所以到处都要带 client 前缀;这个仓库整个就是客户端,前缀全部去掉了。
+# 下面那些注释里踩过的坑一条没删 —— 它们解释的是"为什么是这个写法",换了仓库照样成立。
+#
+# 没有做代码签名/公证 —— 自用够了,代价是:
+#   macOS    第一次打开要右键 → 打开 → 再点一次"打开"(Gatekeeper 拦未签名应用)
+#   Windows  SmartScreen 会提示,点"更多信息 → 仍要运行"
+# 想去掉这些提示需要 Apple 开发者账号($99/年)和代码签名证书,不值得。
+
+name: 构建 rClash
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '构建完发一个 Release'
+        type: boolean
+        default: false
+
+# 同一分支上新的提交会取消还在跑的旧构建,免得排队浪费额度
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # 发 Release 需要
+
+jobs:
+  build:
+    strategy:
+      # 一个平台挂掉不影响其他平台继续出包
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            label: macOS-Apple芯片
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            label: macOS-Intel
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows-x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: Linux-x64
+
+    runs-on: ${{ matrix.os }}
+    # Tauri 构建慢,给足时间;卡住的话也不至于一直占着 runner
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Rust 编译是整个构建里最慢的一步,缓存能把重复构建从几十分钟压到几分钟
+      - name: 缓存 Rust 构建产物
+        uses: swatinem/rust-cache@v2
+        with:
+          # 根目录的 Cargo.toml 是 [workspace],src-tauri 只是成员之一。Cargo 工作区的
+          # target 目录在**工作区根目录**,所以这里是 . 而不是 src-tauri。
+          # 原来写成 src-tauri,等于缓存一直没命中过 —— 每轮都在从零编译。
+          workspaces: . -> target
+          key: ${{ matrix.target }}
+
+      # 显式装目标架构。
+      #
+      # rust-toolchain.toml 钉死了 channel = "1.95.0"。于是有两套工具链:
+      #   上面 dtolnay/rust-toolchain 装的是 stable,targets 输入也是加到 stable 上;
+      #   而 cargo/tauri 实际跑的时候,rustup 读到 rust-toolchain.toml 会切到 1.95.0。
+      # 目标装在 stable 上,编译用的却是 1.95.0,自然报 "target is not installed"。
+      # rustup target add 认的是**当前目录**解析出来的工具链,在仓库根目录跑正好是
+      # 1.95.0(rust-toolchain.toml 就在这儿),所以这一步不需要 working-directory。
+      #
+      # ARM 一直没事,是因为 1.95.0 被自动装上时默认就带了宿主架构 aarch64;
+      # Linux/Windows 编译的同样是各自宿主架构。四个目标里只有 macOS Intel 是真交叉编译。
+      - name: 确保目标架构已安装
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
+          rustup target list --installed
+
+      # webkit2gtk 是 Tauri 在 Linux 上的 WebView 后端;
+      # libayatana-appindicator3 给托盘图标用;patchelf 给打包用。
+      # 这几个是从上游 release.yml 里抄的,少一个都构建不过。
+      - name: 安装 Linux 系统依赖
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: 安装 Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      # 在 nodes-sub 那边这里必须写 package_json_file: client/package.json —— 这个 action
+      # 默认读**仓库根目录**的 package.json 拿 packageManager 字段,而那边根目录没有
+      # package.json,于是报 "Unable to find pnpm version" 四个平台全挂。
+      # 这个仓库的 package.json 就在根目录,默认行为正好是对的,不用再指。
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: 装依赖
+        run: pnpm i
+
+      # prebuild 按目标平台下载 mihomo 内核(sidecar)。不跑这步的话
+      # tauri 打包时会因为找不到 externalBin 里声明的 verge-mihomo 而失败。
+      - name: 下载内核 sidecar
+        run: pnpm run prebuild ${{ matrix.target }}
+
+      - name: 构建
+        uses: tauri-apps/tauri-action@v0
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ matrix.target }}
+          # 交给下面的步骤统一处理产物,不让 action 自己去发 Release
+          includeUpdaterJson: false
+
+      - name: 收集产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          # 路径是 target/ 而不是 src-tauri/target/(见上面缓存那段的说明)。
+          # 写错的后果很隐蔽:构建是绿的,收集产物这一步也是绿的,但一个文件都没上传 ——
+          # 三个平台构建成功、Artifacts 里却是 0 个,就是这么来的。
+          # 各平台实际产出什么,由 tauri.<平台>.conf.json 的 bundle.targets 决定:
+          #   macOS   ['app','dmg']  → .dmg(.app 是目录,glob 不到,它在 dmg 里)
+          #   Linux   ['deb','rpm']  → .deb 和 .rpm
+          #   Windows ['nsis']       → 形如 rClash_2.5.4_x64-setup.exe
+          # 别写 .AppImage —— 配置里根本没开,那一行永远匹配不到,而真正会产出的 .rpm
+          # 反倒会漏收。msi 留着无害(nsis 不产 msi,只是不匹配)。
+          path: |
+            target/${{ matrix.target }}/release/bundle/**/*.dmg
+            target/${{ matrix.target }}/release/bundle/**/*.msi
+            target/${{ matrix.target }}/release/bundle/**/*.exe
+            target/${{ matrix.target }}/release/bundle/**/*.deb
+            target/${{ matrix.target }}/release/bundle/**/*.rpm
+          # 用 error 不用 warn:路径写错时必须红着失败。warn 会让"构建成功但没有产物"
+          # 看起来一切正常,正是上面那个 bug 藏了一整轮没被发现的原因。
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: 发 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+          # 这一行**必须加引号**。里面的 "构建 #{0}" 有个空格加井号,YAML 会把 ` #` 之后的
+          # 内容当成注释整段吃掉,只剩下 "...format('(开发构建" —— 一个没闭合的表达式。
+          # GitHub 解析不了这个表达式,会判整个工作流无效:所有触发方式一律不跑,直接
+          # startup_failure(连 jobs 都不创建)。这个 workflow 曾经连红 14 次就是它。
+          name: "rClash ${{ github.ref_type == 'tag' && github.ref_name || format('(开发构建 #{0})', github.run_number) }}"
+          body: |
+            **rClash** —— 基于 Clash Verge Rev 修改，加了「一键推送美国节点到 Deno」按钮（在代理页测延迟按钮旁边）。
+
+            应用 ID 是独立的（`io.github.zhourg2010.rclash`），可以和已经装着的 Clash Verge Rev 并存、互不干扰；
+            代价是首次启动是全新配置，不会继承 Clash Verge Rev 里已有的订阅。
+
+            **未做代码签名**，首次打开需要：
+            - macOS：右键 → 打开 → 再点一次「打开」
+            - Windows：SmartScreen 提示时点「更多信息 → 仍要运行」
+
+            macOS 请按芯片选择：Apple 芯片下 `aarch64`，Intel 下 `x86_64`。
+          draft: false
+          prerelease: ${{ github.ref_type != 'tag' }}
