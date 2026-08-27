@@ -107,18 +107,29 @@ jobs:
             libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf
 
+      # 顺序很重要:pnpm 必须在 setup-node **之前**装好。
+      #
+      # setup-node@v5 的 package-manager-cache 默认是 true,它会读仓库根目录的
+      # package.json,看到 packageManager: pnpm@... 就去调 pnpm 建缓存。pnpm 这时候
+      # 还没装的话,直接 "Unable to locate executable file: pnpm",四个平台全挂。
+      #
+      # 这个坑是**搬到独立仓库之后才会踩到的**:在 nodes-sub 那边 package.json 在
+      # client/ 里、仓库根目录压根没有,setup-node 检测不到包管理器就跳过缓存,
+      # 所以那边 setup-node 排在前面也没事。搬过来 package.json 到了根目录,
+      # 自动检测生效,顺序就成了硬约束。
+      #
+      # 顺带一提,那边还得写 package_json_file: client/package.json 才能让
+      # pnpm/action-setup 找到版本号;这边不用,它默认读的就是根目录。
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
       - name: 安装 Node
         uses: actions/setup-node@v5
         with:
           node-version: '24'
-
-      # 在 nodes-sub 那边这里必须写 package_json_file: client/package.json —— 这个 action
-      # 默认读**仓库根目录**的 package.json 拿 packageManager 字段,而那边根目录没有
-      # package.json,于是报 "Unable to find pnpm version" 四个平台全挂。
-      # 这个仓库的 package.json 就在根目录,默认行为正好是对的,不用再指。
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
+          # pnpm 已经在上一步装好了,这里的缓存能正常工作 —— 顺带把依赖装得快一些
+          cache: 'pnpm'
 
       - name: 装依赖
         run: pnpm i
