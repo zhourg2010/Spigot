@@ -7,6 +7,7 @@ import {
   ipToInt,
   isIpv4,
   looksUs,
+  nameOfUri,
   type NodeRow,
   parseGeoDb,
   pickForPush,
@@ -338,5 +339,22 @@ describe('switchUrlOf', () => {
   it('地址没填或不合法时返回 null,而不是拼出个假 URL', () => {
     expect(switchUrlOf('')).toBeNull()
     expect(switchUrlOf('不是网址')).toBeNull()
+  })
+})
+
+describe('nameOfUri', () => {
+  it('抠出 # 后面那段并解码', () => {
+    expect(nameOfUri('vless://x@1.2.3.4:443#' + encodeURIComponent('🇺🇸 US_1 | 12 MB/s')))
+      .toBe('🇺🇸 US_1 | 12 MB/s')
+  })
+
+  it('没有 # 就返回空串,而不是把整条 URI 当名字', () => {
+    // vmess 的分享链接就是没有 fragment 的(名字在 base64 里的 ps 字段)
+    expect(nameOfUri('vmess://eyJ2IjoiMiJ9')).toBe('')
+  })
+
+  it('百分号编码坏掉时返回原文,不抛异常', () => {
+    // 单独一个 % 会让 decodeURIComponent 抛 URIError,不能让它把整页搞崩
+    expect(nameOfUri('vless://x@1.2.3.4:443#bad%zz')).toBe('bad%zz')
   })
 })
