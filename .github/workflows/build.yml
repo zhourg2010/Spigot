@@ -196,7 +196,8 @@ jobs:
           # startup_failure(连 jobs 都不创建)。这个 workflow 曾经连红 14 次就是它。
           name: "rClash ${{ github.ref_type == 'tag' && github.ref_name || format('(开发构建 #{0})', github.run_number) }}"
           body: |
-            **rClash** —— 基于 Clash Verge Rev 修改，加了「一键推送美国节点到 Deno」按钮（在代理页测延迟按钮旁边）。
+            **rClash** —— 基于 Clash Verge Rev 修改，左边导航栏最下面多了一页 **Deno Push**，
+            一键把测过、延迟达标的美国节点推给自建的 Deno 订阅服务。
 
             应用 ID 是独立的（`io.github.zhourg2010.rclash`），可以和已经装着的 Clash Verge Rev 并存、互不干扰；
             代价是首次启动是全新配置，不会继承 Clash Verge Rev 里已有的订阅。
