@@ -33,6 +33,39 @@ nodes-sub 那边的 `client/` 和 `build-client.yml` 已经删掉，只在 READM
 
 除此之外没有改动上游代码。
 
+## 改动内容(2026-09-06):Windows 便携版
+
+上游本来就支持便携模式,而且不需要动 Rust —— exe 旁边放一个空的 `.config/PORTABLE`,
+`src-tauri/src/utils/dirs.rs` 的 `init_portable_flag()` 读到它就把配置目录从
+`%APPDATA%\<APP_ID>` 切到 `<exe目录>\.config\<APP_ID>`,更新器也会自动跳过
+(见 `core/updater.rs`)。打包脚本 `scripts/portable.mjs` 上游也有,`package.json`
+里的 `pnpm portable` 就是它 —— 只是上游那套调用它的 workflow 被我们删掉了。
+
+所以这次只做两件事:**修脚本** + **在 workflow 里调它**。
+
+| 文件 | 改了什么 |
+|---|---|
+| `scripts/portable.mjs` | 见下面三条 |
+| `.github/workflows/build.yml` | Windows 那个 job 加一步 `pnpm portable <target>`,产物路径加上 `rClash_*_portable.zip` |
+
+`portable.mjs` 上游那版**对本仓库是坏的**,三处:
+
+1. **release 目录找错了。** 上游写 `./src-tauri/target/<triple>/release`,但根目录的
+   `Cargo.toml` 是 `[workspace]`、`src-tauri` 只是成员之一,**Cargo 工作区的 target 在
+   工作区根**。改成 `./target/<triple>/release`。跟 `build.yml` 里缓存和产物路径栽过的
+   是同一个坑。
+
+2. **主程序名硬编码成 `clash-verge.exe`。** 我们 `productName` 改成了 rClash,
+   `tauri build` 会把 cargo 产出的 `clash-verge.exe` 重命名成 `rClash.exe`。
+   改成从 `tauri.conf.json` 读 `productName`,并保留 Cargo 包名当兜底 —— 万一以后
+   Tauri 改了重命名行为,不至于莫名其妙找不到文件。找不到时会把目录里实际有哪些 `.exe`
+   列出来,光一个 ENOENT 在 CI 日志里没法查。
+
+3. **失败被吞了。** 上游结尾是 `.catch(console.error)` —— 打包失败照样退出码 0。
+   那样 CI 会绿着跑完,最后发一个**没有便携版的 Release**,而且没人会注意到。
+   改成非零退出;缺内核、缺资源目录也一律直接失败,不 warn ——
+   少了内核的便携包就是个开不起来的壳,发出去比不发更糟。
+
 ## 改动内容(2026-08-27):推送功能改成侧边栏独立一页
 
 原来是代理页顶部那排按钮里的一个小图标 + 一个弹窗。现在是左边导航栏**最后一项「Deno Push」**。

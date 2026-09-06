@@ -14,6 +14,17 @@
 打 `v*` 的 tag 会自动构建并发 Release（macOS Apple 芯片 / macOS Intel / Windows / Linux）。
 **没有做代码签名**,首次打开 macOS 要右键→打开,Windows 的 SmartScreen 要点「仍要运行」。
 
+**Windows 有两个包:**
+
+| | |
+|---|---|
+| `..._x64-setup.exe` | 安装版 |
+| `..._x64_portable.zip` | **便携版,解压即用不用装** |
+
+便携版不只是"免安装":配置存在 exe 旁边的 `.config\` 里而不是 `%APPDATA%`,
+整个文件夹拷到 U 盘带走设置跟着走,删掉文件夹系统里不留任何痕迹(注册表也不写)。
+需要系统已有 WebView2 运行时 —— Win11 和较新的 Win10 都自带。
+
 ## 本地构建
 
 ```bash
