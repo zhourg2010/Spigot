@@ -149,6 +149,19 @@ jobs:
           # 交给下面的步骤统一处理产物,不让 action 自己去发 Release
           includeUpdaterJson: false
 
+      # 便携版(绿色版):解压即用,不用安装。只有 Windows 有。
+      #
+      # 关键不在"打了个 zip",而在 zip 里那个空的 .config/PORTABLE ——
+      # dirs.rs 的 init_portable_flag() 认这个文件,认到了就把配置目录切到
+      # exe 旁边的 .config\<APP_ID>,而不是 %APPDATA%。所以这一份是真便携:
+      # 整个文件夹拷走设置跟着走,删掉文件夹系统里不留任何痕迹。
+      #
+      # 脚本是上游的 scripts/portable.mjs,rClash 改了 release 目录和主程序名 ——
+      # 详见那个文件开头的注释。
+      - name: 打包便携版
+        if: matrix.os == 'windows-latest'
+        run: pnpm portable ${{ matrix.target }}
+
       - name: 收集产物
         uses: actions/upload-artifact@v4
         with:
@@ -160,6 +173,8 @@ jobs:
           #   macOS   ['app','dmg']  → .dmg(.app 是目录,glob 不到,它在 dmg 里)
           #   Linux   ['deb','rpm']  → .deb 和 .rpm
           #   Windows ['nsis']       → 形如 rClash_2.5.4_x64-setup.exe
+          # 另外 Windows 还有上一步打的便携版 zip,它不在 bundle 目录里,而是被
+          # portable.mjs 写在仓库根目录,所以单列一行、路径不带前缀。
           # 别写 .AppImage —— 配置里根本没开,那一行永远匹配不到,而真正会产出的 .rpm
           # 反倒会漏收。msi 留着无害(nsis 不产 msi,只是不匹配)。
           path: |
@@ -168,6 +183,7 @@ jobs:
             target/${{ matrix.target }}/release/bundle/**/*.exe
             target/${{ matrix.target }}/release/bundle/**/*.deb
             target/${{ matrix.target }}/release/bundle/**/*.rpm
+            rClash_*_portable.zip
           # 用 error 不用 warn:路径写错时必须红着失败。warn 会让"构建成功但没有产物"
           # 看起来一切正常,正是上面那个 bug 藏了一整轮没被发现的原因。
           if-no-files-found: error
@@ -207,5 +223,11 @@ jobs:
             - Windows：SmartScreen 提示时点「更多信息 → 仍要运行」
 
             macOS 请按芯片选择：Apple 芯片下 `aarch64`，Intel 下 `x86_64`。
+
+            **Windows 有两个包**：
+            - `..._x64-setup.exe` — 安装版
+            - `..._x64_portable.zip` — **便携版**，解压即用不用装。配置存在 exe 旁边的
+              `.config\` 里而不是 `%APPDATA%`，整个文件夹拷走设置跟着走，删掉就不留痕迹。
+              需要系统已有 WebView2 运行时（Win10 较新版本和 Win11 都自带）。
           draft: false
           prerelease: ${{ github.ref_type != 'tag' }}
