@@ -302,8 +302,10 @@ pnpm i && pnpm typecheck && pnpm test && pnpm lint
 
 ## 构建
 
-见 `.github/workflows/build.yml`。打 `v*` 的 tag 会自动出 macOS（Apple 芯片 / Intel）、
-Windows、Linux 的包并发 Release；推 main 只构建，产物挂在那次运行的 Artifacts 里。
+见 `.github/workflows/build.yml`。打 `v*` 的 tag 会构建四个平台并发 Release,
+但 **Release 上只挂 Windows 便携版 zip** —— 平台照常全建(那是 CI 的价值:平台特有的
+编译错误还得靠它发现),只是不都往 Release 上挂。macOS/Linux 的包和 Windows 安装版
+在那次运行的 Artifacts 里,保留 30 天。推 main 只构建,不发 Release。
 
 本地构建：
 

@@ -1,7 +1,7 @@
 # 构建 rClash,出 macOS(Apple 芯片 / Intel)、Windows、Linux 四个包。
 #
 # 触发方式:
-#   - 打 tag v*             → 构建并发一个 GitHub Release
+#   - 打 tag v*             → 构建并发一个 GitHub Release(**只挂 Windows 便携版 zip**)
 #   - 推 main               → 只构建,产物挂在这次运行的 Artifacts 里
 #   - 手动跑(workflow_dispatch)→ 同上;勾了 release 才发布
 #
@@ -223,10 +223,21 @@ jobs:
         with:
           path: dist
 
+      # Release 里**只放便携版 zip**。四个平台照常构建 —— 那是 CI 的价值,平台特有的
+      # 编译错误还得靠它发现;只是构建产物不都往 Release 上挂。安装版(nsis)、dmg、
+      # deb、rpm 仍然在每次运行的 Artifacts 里躺着,真需要随时去取。
+      #
+      # 用 dist/**/ 而不是 dist/:download-artifact 会按 artifact 名建子目录
+      # (dist/Windows-x64/xxx.zip),写 dist/*.zip 一个也匹配不到。
       - name: 发 Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: dist/**/*_portable.zip
+          # glob 匹配不到时**必须红着失败**。默认行为是照发不误,于是你会得到一个
+          # 空的 Release,而且 CI 全绿 —— 跟当初 if-no-files-found: warn 那个坑一模一样。
+          # (下载下来的产物按 artifact 名分在子目录里,是 dist/Windows-x64/xxx.zip,
+          #  所以路径必须带 **/,写 dist/*.zip 一个也匹配不到。)
+          fail_on_unmatched_files: true
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
           # 这一行**必须加引号**。里面的 "构建 #{0}" 有个空格加井号,YAML 会把 ` #` 之后的
           # 内容当成注释整段吃掉,只剩下 "...format('(开发构建" —— 一个没闭合的表达式。
@@ -244,12 +255,12 @@ jobs:
             - macOS：右键 → 打开 → 再点一次「打开」
             - Windows：SmartScreen 提示时点「更多信息 → 仍要运行」
 
-            macOS 请按芯片选择：Apple 芯片下 `aarch64`，Intel 下 `x86_64`。
+            **只提供 Windows 便携版**(`..._x64_portable.zip`)：解压即用，不用安装。
+            配置存在 exe 旁边的 `.config\` 里而不是 `%APPDATA%`，整个文件夹拷走设置跟着走，
+            删掉文件夹系统里不留任何痕迹(注册表也不写)。
+            需要系统已有 WebView2 运行时(Win10 较新版本和 Win11 都自带)。
 
-            **Windows 有两个包**：
-            - `..._x64-setup.exe` — 安装版
-            - `..._x64_portable.zip` — **便携版**，解压即用不用装。配置存在 exe 旁边的
-              `.config\` 里而不是 `%APPDATA%`，整个文件夹拷走设置跟着走，删掉就不留痕迹。
-              需要系统已有 WebView2 运行时（Win10 较新版本和 Win11 都自带）。
+            macOS / Linux 的包和 Windows 安装版没有挂在这里，但每次构建都还在跑 ——
+            需要的话去 Actions 里那次运行的 Artifacts 取。
           draft: false
           prerelease: ${{ github.ref_type != 'tag' }}
