@@ -3,7 +3,8 @@
 # 触发方式:
 #   - 打 tag v*             → 构建并发一个 GitHub Release(**只挂 Windows 便携版 zip**)
 #   - 推 main               → 只构建,产物挂在这次运行的 Artifacts 里
-#   - 手动跑(workflow_dispatch)→ 同上;勾了 release 才发布
+#   - 手动跑(workflow_dispatch)→ 勾了 release 才发布;填了版本号就当正式版发,
+#                                 留空则发成 dev-<运行号> 的预发布
 #
 # 这份配置是从 nodes-sub 仓库的 .github/workflows/build-client.yml 搬过来的。那边源码在
 # client/ 子目录里,所以到处都要带 client 前缀;这个仓库整个就是客户端,前缀全部去掉了。
@@ -28,6 +29,10 @@ on:
         description: '构建完发一个 Release'
         type: boolean
         default: false
+      tag:
+        description: '版本号(如 v2.5.4-r1)。留空则发成 dev-<运行号> 的预发布'
+        type: string
+        default: ''
 
 # 同一分支上新的提交会取消还在跑的旧构建,免得排队浪费额度
 concurrency:
@@ -238,12 +243,17 @@ jobs:
           # (下载下来的产物按 artifact 名分在子目录里,是 dist/Windows-x64/xxx.zip,
           #  所以路径必须带 **/,写 dist/*.zip 一个也匹配不到。)
           fail_on_unmatched_files: true
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+          # 三种来源,优先级从高到低:真的打了 tag → 手动跑时填的 tag → dev-<运行号>。
+          #
+          # 中间那条是为了绕开一个现实限制:某些环境下有推分支的权限、没有推 tag 的权限
+          # (git push tag 直接 403)。而 action-gh-release 会在指定 commit 上**自己创建
+          # tag**,所以手动跑 + 填版本号,效果跟打 tag 完全一样,不需要额外权限。
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('dev-{0}', github.run_number) }}
           # 这一行**必须加引号**。里面的 "构建 #{0}" 有个空格加井号,YAML 会把 ` #` 之后的
           # 内容当成注释整段吃掉,只剩下 "...format('(开发构建" —— 一个没闭合的表达式。
           # GitHub 解析不了这个表达式,会判整个工作流无效:所有触发方式一律不跑,直接
           # startup_failure(连 jobs 都不创建)。这个 workflow 曾经连红 14 次就是它。
-          name: "rClash ${{ github.ref_type == 'tag' && github.ref_name || format('(开发构建 #{0})', github.run_number) }}"
+          name: "rClash ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('(开发构建 #{0})', github.run_number) }}"
           body: |
             **rClash** —— 基于 Clash Verge Rev 修改，左边导航栏最下面多了一页 **Deno Push**，
             一键把测过、延迟达标的美国节点推给自建的 Deno 订阅服务。
@@ -263,4 +273,6 @@ jobs:
             macOS / Linux 的包和 Windows 安装版没有挂在这里，但每次构建都还在跑 ——
             需要的话去 Actions 里那次运行的 Artifacts 取。
           draft: false
-          prerelease: ${{ github.ref_type != 'tag' }}
+          # 只有"既不是 tag、也没填版本号"的开发构建才算预发布。
+          # 手动跑但填了版本号的,跟打 tag 一样是正式发布。
+          prerelease: ${{ github.ref_type != 'tag' && inputs.tag == '' }}
