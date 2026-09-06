@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "identifier": "io.github.zhourg2010.rclash",
+  "identifier": "io.github.zhourg2010.spigot",
   "bundle": {
     "targets": ["nsis"],
     "windows": {

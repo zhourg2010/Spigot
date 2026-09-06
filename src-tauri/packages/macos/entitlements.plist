@@ -6,7 +6,7 @@
     <false/>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>io.github.zhourg2010.rclash</string>
+        <string>io.github.zhourg2010.spigot</string>
     </array>
     <key>com.apple.security.inherit</key>
     <true/>

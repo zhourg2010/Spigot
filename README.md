@@ -1,4 +1,6 @@
-# rClash
+# Spigot
+
+*水龙头。节点从这儿流向自建订阅服务，Deno Push 页上那个开关就是把阀门拧上（订阅链接一律 404）。*
 
 **这是 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) 的自用修改版**
 （基于上游 v2.5.4），不是官方版本，上游作者对它不负任何责任、也没有为它背书。
@@ -6,7 +8,7 @@
 改了什么、为什么这么改、怎么同步上游新版本 —— 全部写在 **[MODIFICATIONS.md](./MODIFICATIONS.md)** 里。
 一句话版本:左边导航栏最下面多了一页 **Deno Push**，能列出内核里全部节点、过滤、挑一批推给
 自建订阅服务，还能一键让订阅服务装死(所有链接返回 404)；设置在设置页的「Deno Push」一节。
-另外把应用名/ID/计划任务名改成了 rClash，好跟机器上已经装着的 Clash Verge Rev 并存互不打架。
+另外把应用名/ID/计划任务名改成了 Spigot，好跟机器上已经装着的 Clash Verge Rev 并存互不打架。
 
 许可证跟上游一致:**GNU GPL-3.0-only**,见 [LICENSE](./LICENSE)。
 

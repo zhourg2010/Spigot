@@ -110,7 +110,7 @@ const SettingPage = () => {
           >
             <SettingVergeAdvanced onError={onError} />
           </Box>
-          {/* rClash 新增。放右栏最后:左栏是内核/系统那些"改了会影响联网"的设置,
+          {/* Spigot 新增。放右栏最后:左栏是内核/系统那些"改了会影响联网"的设置,
               右栏是应用层的,Deno Push 属于后者。 */}
           <Box
             sx={{

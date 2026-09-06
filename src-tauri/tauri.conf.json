@@ -3,7 +3,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "active": true,
-    "longDescription": "rClash:在 Clash Verge Rev 基础上增加了「一键推送美国节点到 Deno」的自用客户端。",
+    "longDescription": "Spigot:在 Clash Verge Rev 基础上增加了「一键推送美国节点到 Deno」的自用客户端。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -13,11 +13,11 @@
       "icons/Assets.car"
     ],
     "resources": ["resources"],
-    "publisher": "rClash",
+    "publisher": "Spigot",
     "externalBin": ["sidecar/verge-mihomo", "sidecar/verge-mihomo-alpha"],
     "copyright": "GNU General Public License v3.0",
     "category": "DeveloperTool",
-    "shortDescription": "rClash — 基于 Clash Verge Rev 修改",
+    "shortDescription": "Spigot — 基于 Clash Verge Rev 修改",
     "createUpdaterArtifacts": false
   },
   "build": {
@@ -27,13 +27,13 @@
     "devUrl": "http://localhost:3000/",
     "removeUnusedCommands": true
   },
-  "productName": "rClash",
-  "identifier": "io.github.zhourg2010.rclash",
+  "productName": "Spigot",
+  "identifier": "io.github.zhourg2010.spigot",
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyOEMyRjBCQkVGOUJEREYKUldUZnZmbStDeStNMHU5Mmo1N24xQXZwSVRYbXA2NUpzZE5oVzlqeS9Bc0t6RVV4MmtwVjBZaHgK",
       "endpoints": [
-        "https://github.com/zhourg2010/nodes-sub/releases/download/updater/update.json"
+        "https://github.com/zhourg2010/Spigot/releases/download/updater/update.json"
       ],
       "windows": {
         "installMode": "passive"
