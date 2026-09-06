@@ -434,8 +434,8 @@ export function utf8ToBase64(s: string): string {
  * 而且轮转天然保证各协议都有代表,不会出现"Deno 那边某个客户端链接过滤掉某协议之后
  * 一个节点都不剩"的情况。
  */
-export function roundRobin(byProto: Map<string, ClashProxy[]>, limit: number): ClashProxy[] {
-  const out: ClashProxy[] = []
+export function roundRobin<T>(byProto: Map<string, T[]>, limit: number): T[] {
+  const out: T[] = []
   const idx = new Map<string, number>()
   for (;;) {
     let progressed = false
@@ -483,6 +483,264 @@ export function looksUs(name: string): boolean {
   return US_HINTS.some((h) => name.includes(h) || upper.includes(h))
 }
 
+// ---------------------------------------------------------------- 节点扫描
+//
+// 下面这几个是把原来埋在 pushToDeno 里的中间步骤拆出来的。拆的原因很实际:
+// 「推之前先看看都有哪些节点、自己挑一批」这件事,需要的正是 pushToDeno 算到一半
+// 的那份数据。以前它只在函数内部存在,算完就扔了。
+//
+// 分工:
+//   scanNodes()  把内核当前加载的节点摊成一张表,**不做任何筛选**
+//   pickForPush() 按设置自动筛(美国 + 延迟达标),就是老的那套判据
+//   pushRows()   把给定的一批节点推上去,不管它们是怎么选出来的
+//   pushToDeno() = 上面三个串起来,行为跟以前一模一样
+
+/** 表里的一行。UI 的过滤、排序、勾选全都基于它。 */
+export interface NodeRow {
+  name: string
+  proto: string
+  server: string
+  port: number
+  /** 解析出来的服务器 IP。null = 域名解析不了 */
+  ip: string | null
+  /** GeoIP 查出来的国家码。null = 查不到(IP 没有 或 库里没这段) */
+  cc: string | null
+  /** 内核里最近一次实测延迟,毫秒。0 = 没测过 */
+  delay: number
+  /** 转成的分享链接。空串 = 这个节点缺关键字段,转不出来,也就推不了 */
+  uri: string
+  /**
+   * 各个服务的可达性,key 见 REACH_TARGETS。值是毫秒,0 表示连不上。
+   * undefined = 还没测过这一项。测这个要逐节点拨号,很慢,所以按需触发。
+   */
+  reach?: Record<string, number>
+}
+
+export interface ScanResult {
+  rows: NodeRow[]
+  /** GeoIP 库能不能用。用不了的话所有 cc 都是 null */
+  geoReady: boolean
+  /** 有几个节点拿到了延迟。0 基本就意味着还没点过测延迟 */
+  withDelay: number
+}
+
+/**
+ * 把内核当前加载的节点摊成一张表。**不筛任何东西** —— 筛选是界面的事,
+ * 这里只负责"把事实摆出来"。连不可用的节点也在表里,只是 uri 是空串、delay 是 0,
+ * 界面上会标出来。看得见"为什么这个节点没被推"比默默消失有用得多。
+ */
+export async function scanNodes(onProgress?: (msg: string) => void): Promise<ScanResult> {
+  const say = (m: string) => onProgress?.(m)
+
+  say('读取内核当前加载的节点…')
+  const proxies = await loadRuntimeProxies()
+  if (proxies.length === 0) return { rows: [], geoReady: false, withDelay: 0 }
+
+  say('准备 GeoIP 库…')
+  const geoReady = await ensureGeoDb()
+
+  say('查询节点延迟…')
+  let delays = new Map<string, number>()
+  try {
+    delays = await loadDelays()
+  } catch {
+    // 拿不到延迟不致命,表里 delay 全是 0,界面会提示去点测延迟
+  }
+
+  say(`解析 ${proxies.length} 个节点的服务器地址…`)
+  const hosts = [...new Set(proxies.map((p) => String(p.server ?? '')).filter(Boolean))]
+  const ipOf = new Map<string, string | null>()
+  // 并发解析。串行的话一个解析不了的域名要等超时,几百个节点能拖到分钟级。
+  const CONCURRENCY = 16
+  for (let i = 0; i < hosts.length; i += CONCURRENCY) {
+    const batch = hosts.slice(i, i + CONCURRENCY)
+    const ips = await Promise.all(batch.map((h) => resolveHost(h)))
+    batch.forEach((h, k) => ipOf.set(h, ips[k]))
+  }
+
+  const rows: NodeRow[] = proxies.map((p) => {
+    const server = String(p.server ?? '')
+    const ip = ipOf.get(server) ?? null
+    return {
+      name: p.name,
+      proto: p.type,
+      server,
+      port: Number(p.port ?? 0),
+      ip,
+      cc: ip && geoReady ? countryOfIp(ip) : null,
+      delay: delays.get(p.name) ?? 0,
+      uri: toShareUri(p),
+    }
+  })
+
+  return { rows, geoReady, withDelay: rows.filter((r) => r.delay > 0).length }
+}
+
+/**
+ * 老的那套自动判据:GeoIP 确认美国 + 延迟达标。返回选中的行 + 统计。
+ *
+ * 判据是 **GeoIP,不是节点名**。机场的命名五花八门("🇺🇸 美国 洛杉矶 01"、"US-LA-01"、
+ * "United States 03"…),拿名字当硬门槛会误杀一大片(这个坑在 Python 版踩过:
+ * 8 个真实机场命名里 3 个美国节点被误杀,而且日志里看不出是误杀)。
+ */
+export function pickForPush(
+  rows: NodeRow[],
+  settings: DenoPushSettings,
+): { picked: NodeRow[]; us: number; alive: number; mislabeled: number; unverified: number } {
+  let mislabeled = 0
+  let unverified = 0
+  const us: NodeRow[] = []
+
+  for (const r of rows) {
+    if (r.cc === 'US') {
+      us.push(r)
+      continue
+    }
+    if (r.cc === null) {
+      unverified++
+      // "验证不了"在只要美国节点的前提下等同于"不算数"。非严格模式才退回看名字。
+      if (!settings.geoipStrict && looksUs(r.name)) us.push(r)
+      continue
+    }
+    if (looksUs(r.name)) mislabeled++
+  }
+
+  const alive = us
+    .filter((r) => r.delay > 0 && r.delay <= settings.maxDelay)
+    .sort((a, b) => a.delay - b.delay)
+
+  return { picked: alive, us: us.length, alive: alive.length, mislabeled, unverified }
+}
+
+/**
+ * 把给定的一批节点推上去。**不管它们是怎么选出来的** —— 自动筛的、手动勾的,
+ * 到这儿一视同仁。
+ *
+ * 仍然做两件保命的事:按协议轮转取满上限(保证各协议都有代表,否则订阅服务那边
+ * 按协议过滤后可能某个客户端一个节点都不剩),以及低于 minKeep 就拒绝推送
+ * (保住 Deno 上一批,防止推空导致全家断网)。
+ */
+export async function pushRows(
+  settings: DenoPushSettings,
+  rows: NodeRow[],
+  onProgress?: (msg: string) => void,
+): Promise<PushReport> {
+  const say = (m: string) => onProgress?.(m)
+  const base: PushReport = {
+    ok: false,
+    message: '',
+    total: rows.length,
+    us: 0,
+    alive: rows.length,
+    pushed: 0,
+    mislabeled: 0,
+    unverified: 0,
+    byProto: {},
+  }
+
+  if (!settings.pushUrl || !settings.pushKey) {
+    return { ...base, message: '还没填推送地址和密钥,先去「设置」里配好。' }
+  }
+
+  // 转不出分享链接的节点直接排除 —— 推上去也是坏行
+  const usable = rows.filter((r) => r.uri)
+  const byProto = new Map<string, NodeRow[]>()
+  for (const r of usable) {
+    const list = byProto.get(r.proto) ?? []
+    list.push(r)
+    byProto.set(r.proto, list)
+  }
+  const picked = roundRobin(byProto, settings.maxNodes)
+  for (const r of picked) base.byProto[r.proto] = (base.byProto[r.proto] ?? 0) + 1
+
+  if (picked.length < settings.minKeep) {
+    return {
+      ...base,
+      pushed: picked.length,
+      message: `只有 ${picked.length} 个可推的节点,低于安全线 ${settings.minKeep} 个。` +
+        '本轮不推送,保留 Deno 上一批节点。',
+    }
+  }
+
+  // 末尾追加一个时间戳标记节点(指向 127.0.0.1,连不通)。它的作用只是让家人在客户端
+  // 节点列表末尾一眼看出这批节点是什么时候推的。Deno 端会把它排除在数量统计之外。
+  const uris = picked.map((r) => r.uri)
+  const stamp = `🇺🇸US 更新于 ${formatNow()}`
+  uris.push(
+    'vless://00000000-0000-0000-0000-000000000000@127.0.0.1:1' +
+      `?encryption=none&security=none&type=tcp#${encodeURIComponent(stamp)}`,
+  )
+
+  say(`推送 ${uris.length - 1} 个节点…`)
+  try {
+    const resp = await fetch(settings.pushUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${settings.pushKey}`,
+        'content-type': 'text/plain; charset=utf-8',
+      },
+      body: utf8ToBase64(uris.join('\n') + '\n'),
+      connectTimeout: 30000,
+    })
+    const text = await resp.text()
+    if (!resp.ok) {
+      return { ...base, message: `推送失败 HTTP ${resp.status}: ${text.slice(0, 200)}` }
+    }
+    return { ...base, ok: true, pushed: uris.length - 1, message: `已推送 ${uris.length - 1} 个节点。` }
+  } catch (e) {
+    return { ...base, message: `推送出错: ${String(e)}` }
+  }
+}
+
+// ---------------------------------------------------------------- 服务总开关
+//
+// 对应 Deno 端的 routes/switch.ts。地址从 pushUrl 推出来(同一个域名换个路径),
+// 不让用户再填一遍 —— 两个地址永远在同一台服务器上,分开填只会填错。
+
+export interface ServiceState {
+  up: boolean
+  changedAt: number
+}
+
+/** 从 pushUrl 推出 /switch 的地址。pushUrl 没填或不是合法 URL 就返回 null。 */
+export function switchUrlOf(pushUrl: string): string | null {
+  try {
+    return new URL('/switch', pushUrl).toString()
+  } catch {
+    return null
+  }
+}
+
+export async function getServiceState(settings: DenoPushSettings): Promise<ServiceState> {
+  const url = switchUrlOf(settings.pushUrl)
+  if (!url || !settings.pushKey) throw new Error('还没配好推送地址和密钥')
+  const r = await fetch(url, {
+    headers: { authorization: `Bearer ${settings.pushKey}` },
+    connectTimeout: 15000,
+  })
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`)
+  return (await r.json()) as ServiceState
+}
+
+export async function setServiceState(
+  settings: DenoPushSettings,
+  up: boolean,
+): Promise<ServiceState> {
+  const url = switchUrlOf(settings.pushUrl)
+  if (!url || !settings.pushKey) throw new Error('还没配好推送地址和密钥')
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${settings.pushKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ up }),
+    connectTimeout: 15000,
+  })
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`)
+  return (await r.json()) as ServiceState
+}
+
 // ---------------------------------------------------------------- 主流程
 
 /**
@@ -499,157 +757,55 @@ export async function pushToDeno(
   settings: DenoPushSettings,
   onProgress?: (msg: string) => void,
 ): Promise<PushReport> {
-  const say = (m: string) => onProgress?.(m)
   const empty: PushReport = {
-    ok: false,
-    message: '',
-    total: 0,
-    us: 0,
-    alive: 0,
-    pushed: 0,
-    mislabeled: 0,
-    unverified: 0,
-    byProto: {},
+    ok: false, message: '', total: 0, us: 0, alive: 0,
+    pushed: 0, mislabeled: 0, unverified: 0, byProto: {},
   }
 
   if (!settings.pushUrl || !settings.pushKey) {
-    return { ...empty, message: '还没填推送地址和密钥,先去设置里配好。' }
+    return { ...empty, message: '还没填推送地址和密钥,先去「设置」里配好。' }
   }
 
-  say('读取内核当前加载的节点…')
-  const proxies = await loadRuntimeProxies()
-  if (proxies.length === 0) {
+  const scan = await scanNodes(onProgress)
+  if (scan.rows.length === 0) {
     return { ...empty, message: '内核里没有可转换的节点(vless/anytls/trojan/vmess/ss)。' }
   }
 
-  say('准备 GeoIP 库…')
-  const geoReady = await ensureGeoDb()
-  if (!geoReady && settings.geoipStrict) {
+  if (!scan.geoReady && settings.geoipStrict) {
     // 严格模式下没有 GeoIP 就等于没有判据。这时候推送等于把一池子没核实过国家的
     // 节点发出去,不如不推——Deno 上一批还在,家里不会断网。
     return {
       ...empty,
-      total: proxies.length,
-      message:
-        'GeoIP 库不可用(下载失败且本地没有缓存)。严格模式下无法核实节点是否真在美国,' +
+      total: scan.rows.length,
+      message: 'GeoIP 库不可用(下载失败且本地没有缓存)。严格模式下无法核实节点是否真在美国,' +
         '本轮不推送,保留 Deno 上一批节点。',
     }
   }
 
-  say('查询节点延迟…')
-  let delays = new Map<string, number>()
-  try {
-    delays = await loadDelays()
-  } catch {
-    // 拿不到延迟不致命——下面会因为没有延迟数据而全部落到"未测速"分支,
-    // 由调用方在界面上提示先点一下测延迟。
+  onProgress?.('按 GeoIP 筛选美国节点…')
+  const pick = pickForPush(scan.rows, settings)
+  const stats = {
+    total: scan.rows.length,
+    us: pick.us,
+    alive: pick.alive,
+    mislabeled: pick.mislabeled,
+    unverified: pick.unverified,
   }
 
-  say(`解析 ${proxies.length} 个节点的服务器地址…`)
-  const hosts = [...new Set(proxies.map((p) => String(p.server ?? '')).filter(Boolean))]
-  const ipOf = new Map<string, string | null>()
-  // 并发解析。串行的话一个解析不了的域名要等超时,几百个节点能拖到分钟级。
-  const CONCURRENCY = 16
-  for (let i = 0; i < hosts.length; i += CONCURRENCY) {
-    const batch = hosts.slice(i, i + CONCURRENCY)
-    const ips = await Promise.all(batch.map((h) => resolveHost(h)))
-    batch.forEach((h, k) => ipOf.set(h, ips[k]))
+  if (pick.us === 0) {
+    return { ...empty, ...stats, message: '一个经 GeoIP 确认的美国节点都没有,本轮不推送。' }
   }
-
-  say('按 GeoIP 筛选美国节点…')
-  const report = { ...empty, total: proxies.length }
-  const usNodes: ClashProxy[] = []
-  for (const p of proxies) {
-    const ip = ipOf.get(String(p.server ?? '')) ?? null
-    const cc = ip && geoReady ? countryOfIp(ip) : null
-    if (cc === 'US') {
-      usNodes.push(p)
-      continue
-    }
-    if (cc === null) {
-      report.unverified++
-      // "验证不了"在只要美国节点的前提下等同于"不算数"。非严格模式才退回看名字。
-      if (!settings.geoipStrict && looksUs(p.name)) usNodes.push(p)
-      continue
-    }
-    if (looksUs(p.name)) report.mislabeled++
-  }
-  report.us = usNodes.length
-  if (usNodes.length === 0) {
-    return { ...report, message: '一个经 GeoIP 确认的美国节点都没有,本轮不推送。' }
-  }
-
-  const alive = usNodes
-    .map((p) => ({ p, delay: delays.get(p.name) ?? 0 }))
-    .filter((x) => x.delay > 0 && x.delay <= settings.maxDelay)
-    .sort((a, b) => a.delay - b.delay)
-  report.alive = alive.length
-
-  if (alive.length === 0) {
+  if (pick.alive === 0) {
     return {
-      ...report,
-      message:
-        `${usNodes.length} 个美国节点里没有一个延迟达标(≤${settings.maxDelay}ms)。` +
+      ...empty, ...stats,
+      message: `${pick.us} 个美国节点里没有一个延迟达标(≤${settings.maxDelay}ms)。` +
         '先点一下测延迟按钮,再来推送。',
     }
   }
 
-  const byProto = new Map<string, ClashProxy[]>()
-  for (const { p } of alive) {
-    const list = byProto.get(p.type) ?? []
-    list.push(p)
-    byProto.set(p.type, list)
-  }
-  const picked = roundRobin(byProto, settings.maxNodes)
-
-  const uris = picked.map(toShareUri).filter(Boolean)
-  for (const p of picked) {
-    report.byProto[p.type] = (report.byProto[p.type] ?? 0) + 1
-  }
-
-  if (uris.length < settings.minKeep) {
-    return {
-      ...report,
-      pushed: uris.length,
-      message:
-        `只凑出 ${uris.length} 个节点,低于安全线 ${settings.minKeep} 个。` +
-        '本轮不推送,保留 Deno 上一批节点。',
-    }
-  }
-
-  // 末尾追加一个时间戳标记节点(指向 127.0.0.1,连不通)。它的作用只是让家人在客户端
-  // 节点列表末尾一眼看出这批节点是什么时候推的。Deno 端会把它排除在数量统计之外。
-  const stamp = `🇺🇸US 更新于 ${formatNow()}`
-  uris.push(
-    'vless://00000000-0000-0000-0000-000000000000@127.0.0.1:1' +
-      `?encryption=none&security=none&type=tcp#${encodeURIComponent(stamp)}`,
-  )
-
-  say(`推送 ${uris.length - 1} 个节点…`)
-  const body = utf8ToBase64(uris.join('\n') + '\n')
-  try {
-    const resp = await fetch(settings.pushUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${settings.pushKey}`,
-        'content-type': 'text/plain; charset=utf-8',
-      },
-      body,
-      connectTimeout: 30000,
-    })
-    const text = await resp.text()
-    if (!resp.ok) {
-      return { ...report, pushed: 0, message: `推送失败 HTTP ${resp.status}: ${text.slice(0, 200)}` }
-    }
-    return {
-      ...report,
-      ok: true,
-      pushed: uris.length - 1,
-      message: `已推送 ${uris.length - 1} 个美国节点。`,
-    }
-  } catch (e) {
-    return { ...report, pushed: 0, message: `推送出错: ${String(e)}` }
-  }
+  // 真正的推送交给 pushRows —— 手动勾选走的也是它,只有一份实现
+  const r = await pushRows(settings, pick.picked, onProgress)
+  return { ...r, ...stats }
 }
 
 function formatNow(): string {
