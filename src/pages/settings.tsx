@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 
 import { BasePage } from '@/components/base'
 import SettingClash from '@/components/setting/setting-clash'
+import SettingDenoPush from '@/components/setting/setting-deno-push'
 import SettingSystem from '@/components/setting/setting-system'
 import SettingVergeAdvanced from '@/components/setting/setting-verge-advanced'
 import SettingVergeBasic from '@/components/setting/setting-verge-basic'
@@ -103,10 +104,21 @@ const SettingPage = () => {
           <Box
             sx={{
               borderRadius: 2,
+              marginBottom: 1.5,
               backgroundColor: isDark ? '#282a36' : '#ffffff',
             }}
           >
             <SettingVergeAdvanced onError={onError} />
+          </Box>
+          {/* rClash 新增。放右栏最后:左栏是内核/系统那些"改了会影响联网"的设置,
+              右栏是应用层的,Deno Push 属于后者。 */}
+          <Box
+            sx={{
+              borderRadius: 2,
+              backgroundColor: isDark ? '#282a36' : '#ffffff',
+            }}
+          >
+            <SettingDenoPush onError={onError} />
           </Box>
         </Grid>
       </Grid>

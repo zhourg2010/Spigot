@@ -1,267 +1,422 @@
 /**
- * deno-push.tsx — 「Deno Push」页:把内核里当前这批节点里的美国节点推给自建订阅服务。
+ * deno-push.tsx — 「Deno Push」页:看当前内核里都有哪些节点,挑一批推给自建订阅服务,
+ * 以及一个让订阅服务立刻装死的总开关。
  *
- * 原来这个功能是代理页顶部那排按钮里的一个小图标 + 一个弹窗。挪成独立一页之后:
- *   - 设置不用挤在弹窗里,推送报告也能摊开显示,不用点两次才看得到
- *   - "先测延迟再推送"这条前提可以写在页面上,而不是藏在弹窗底部的小字里
+ * 页面分三块:
+ *   1. 服务开关   订阅服务现在开着还是关着,一键切
+ *   2. 工具条     扫描 / 过滤 / 选中多少 / 推送
+ *   3. 节点表     内核当前加载的全部节点,连推不了的也列出来
  *
- * 逻辑仍然全在 services/deno-push.ts,这里只管界面 —— 那份 service 一行没改。
+ * **推不了的节点也显示**,只是行是灰的、勾选框禁用。看得见"这个节点为什么没被推"
+ * (延迟没测、GeoIP 不是美国、缺字段转不出链接)比它默默消失有用得多 ——
+ * 以前那版就是默默消失,结果"为什么只推了 12 个"这种问题只能靠猜。
  *
- * 推送用的是**内核里已有的延迟数据**,自己不重测。所以正常用法是先去代理页点测延迟,
- * 再回来推。延迟数据缺失时 service 会明确说,不会静悄悄推一批 0ms 的上去。
+ * 设置(地址、密钥、几个阈值)不在这一页,在**设置页**的「Deno Push」一节。
+ * 那些是配一次就不动的东西,跟这一页天天要干的事不是一回事。
+ *
+ * 逻辑全在 services/deno-push.ts:scanNodes 摊表、pickForPush 自动筛、pushRows 推。
+ * 这里只管界面和"用户挑了哪些"。
  */
 
-import { CloudUploadRounded } from '@mui/icons-material'
+import {
+  CloudUploadRounded,
+  PowerSettingsNewRounded,
+  RefreshRounded,
+} from '@mui/icons-material'
 import {
   Box,
   Button,
   Card,
+  Checkbox,
+  Chip,
   CircularProgress,
-  Divider,
-  FormControlLabel,
-  Switch,
+  MenuItem,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { BasePage } from '@/components/base'
 import {
   DEFAULT_SETTINGS,
   type DenoPushSettings,
+  getServiceState,
   loadSettings,
+  type NodeRow,
+  pickForPush,
   type PushReport,
-  pushToDeno,
-  saveSettings,
+  pushRows,
+  scanNodes,
+  type ServiceState,
+  setServiceState,
 } from '@/services/deno-push'
 import { showNotice } from '@/services/notice-service'
 
+/** 节点能不能推。转不出分享链接的,推上去也是坏行。 */
+const pushable = (r: NodeRow) => !!r.uri
+
 const DenoPushPage = () => {
   const [settings, setSettings] = useState<DenoPushSettings>(DEFAULT_SETTINGS)
-  const [draft, setDraft] = useState<DenoPushSettings>(DEFAULT_SETTINGS)
-  const [loaded, setLoaded] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [configured, setConfigured] = useState(false)
+
+  const [rows, setRows] = useState<NodeRow[]>([])
+  const [geoReady, setGeoReady] = useState(true)
+  const [scanned, setScanned] = useState(false)
+  const [busy, setBusy] = useState('')
   const [progress, setProgress] = useState('')
   const [report, setReport] = useState<PushReport | null>(null)
+
+  // 勾选状态按**节点名**存,不是按下标 —— 重新扫描之后顺序会变,存下标等于选错节点。
+  const [chosen, setChosen] = useState<Set<string>>(new Set())
+
+  const [kw, setKw] = useState('')
+  const [cc, setCc] = useState('ALL')
+  const [proto, setProto] = useState('ALL')
+  const [onlyAlive, setOnlyAlive] = useState(true)
+
+  const [svc, setSvc] = useState<ServiceState | null>(null)
 
   useEffect(() => {
     loadSettings().then((s) => {
       setSettings(s)
-      setDraft(s)
-      setLoaded(true)
+      setConfigured(!!s.pushUrl && !!s.pushKey)
+      if (s.pushUrl && s.pushKey) {
+        getServiceState(s)
+          .then(setSvc)
+          // 读不到不弹错:可能只是没联网或者还没部署。界面上显示"未知"就够了。
+          .catch(() => setSvc(null))
+      }
     })
   }, [])
 
-  // 草稿跟已保存的不一样 = 有没保存的改动。用它来提示,免得改了没存就去点推送
-  // ——推送用的是 settings 不是 draft,不提示的话会以为新设置生效了。
-  const dirty = loaded && JSON.stringify(draft) !== JSON.stringify(settings)
-  const configured = !!settings.pushUrl && !!settings.pushKey
+  // ---------------- 过滤 ----------------
 
-  const normalize = (s: DenoPushSettings): DenoPushSettings => ({
-    ...s,
-    // 数字字段从 TextField 回来可能是空串或 NaN,兜回默认值,避免存进去一个坏配置
-    maxNodes: Number(s.maxNodes) || DEFAULT_SETTINGS.maxNodes,
-    maxDelay: Number(s.maxDelay) || DEFAULT_SETTINGS.maxDelay,
-    minKeep: Number(s.minKeep) || DEFAULT_SETTINGS.minKeep,
-    pushUrl: s.pushUrl.trim(),
-    pushKey: s.pushKey.trim(),
-  })
+  const countries = useMemo(() => {
+    const set = new Set<string>()
+    for (const r of rows) set.add(r.cc ?? '未知')
+    return [...set].sort()
+  }, [rows])
 
-  const onSave = async () => {
-    const next = normalize(draft)
-    await saveSettings(next)
-    setSettings(next)
-    setDraft(next)
-    showNotice.success('设置已保存')
-  }
+  const protos = useMemo(() => [...new Set(rows.map((r) => r.proto))].sort(), [rows])
 
-  const onPush = async () => {
+  const shown = useMemo(() => {
+    const k = kw.trim().toLowerCase()
+    return rows.filter((r) => {
+      if (cc !== 'ALL' && (r.cc ?? '未知') !== cc) return false
+      if (proto !== 'ALL' && r.proto !== proto) return false
+      if (onlyAlive && r.delay <= 0) return false
+      if (!k) return true
+      // 名字、服务器域名、IP 一起搜 —— 想按 IP 段挑的时候直接敲 "104." 就行
+      return (
+        r.name.toLowerCase().includes(k) ||
+        r.server.toLowerCase().includes(k) ||
+        (r.ip ?? '').includes(k)
+      )
+    })
+  }, [rows, kw, cc, proto, onlyAlive])
+
+  const shownPushable = useMemo(() => shown.filter(pushable), [shown])
+  const chosenRows = useMemo(() => rows.filter((r) => chosen.has(r.name) && pushable(r)), [rows, chosen])
+
+  // ---------------- 动作 ----------------
+
+  const scan = async () => {
     if (busy) return
-    setBusy(true)
+    setBusy('scan')
     setProgress('')
     setReport(null)
     try {
-      const r = await pushToDeno(settings, setProgress)
+      const res = await scanNodes(setProgress)
+      setRows(res.rows)
+      setGeoReady(res.geoReady)
+      setScanned(true)
+      // 扫完默认按老的那套判据勾上(美国 + 延迟达标)—— 大多数时候这就是你要推的,
+      // 想改再手动动。默认全不选的话每次都要先点一遍全选,毫无意义。
+      const auto = pickForPush(res.rows, settings)
+      setChosen(new Set(auto.picked.map((r) => r.name)))
+      if (res.withDelay === 0) {
+        showNotice.info('所有节点都没有延迟数据 —— 先去「代理」页点一下测延迟')
+      }
+    } catch (e) {
+      showNotice.error(`扫描失败: ${String(e)}`)
+    } finally {
+      setBusy('')
+      setProgress('')
+    }
+  }
+
+  const push = async () => {
+    if (busy || chosenRows.length === 0) return
+    setBusy('push')
+    setProgress('')
+    setReport(null)
+    try {
+      const r = await pushRows(settings, chosenRows, setProgress)
       setReport(r)
       if (r.ok) showNotice.success(r.message)
       else showNotice.error(r.message)
     } catch (e) {
       showNotice.error(`推送出错: ${String(e)}`)
     } finally {
-      setBusy(false)
+      setBusy('')
       setProgress('')
     }
   }
 
+  const toggleService = async () => {
+    if (busy || !svc) return
+    const next = !svc.up
+    if (next === false && !confirm('关闭之后所有订阅链接立刻返回 404,家人拉不到订阅。确定?')) {
+      return
+    }
+    setBusy('svc')
+    try {
+      setSvc(await setServiceState(settings, next))
+      showNotice.success(next ? '服务已开启' : '服务已关闭,订阅链接现在一律 404')
+    } catch (e) {
+      showNotice.error(`切换失败: ${String(e)}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const setAll = (on: boolean) => {
+    const next = new Set(chosen)
+    for (const r of shownPushable) {
+      if (on) next.add(r.name)
+      else next.delete(r.name)
+    }
+    setChosen(next)
+  }
+
+  // ---------------- 渲染 ----------------
+
+  if (!configured) {
+    return (
+      <BasePage title="Deno Push">
+        <Card sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 700, mb: 1 }}>还没配置</Typography>
+          <Typography variant="body2" color="text.secondary">
+            去<b>设置</b>页最下面的「Deno Push」一节,填好推送地址和密钥,再回来。
+          </Typography>
+        </Card>
+      </BasePage>
+    )
+  }
+
   return (
     <BasePage title="Deno Push">
-      <Card sx={{ p: 2.5, mb: 2 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+      {/* ---- 服务开关 ---- */}
+      <Card
+        sx={{
+          p: 2,
+          mb: 1.5,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 2,
+          flexWrap: 'wrap',
+          // 关掉是需要一眼看见的状态,给整块底色而不是一个小徽章
+          bgcolor: svc === null ? undefined : svc.up ? 'success.light' : 'error.light',
+          opacity: svc === null ? 1 : 0.96,
+        }}
+      >
+        <Box sx={{ flex: 1, minWidth: 240 }}>
+          <Typography sx={{ fontWeight: 700 }}>
+            {svc === null ? '服务状态未知' : svc.up ? '订阅服务开启中' : '订阅服务已关闭'}
+          </Typography>
+          <Typography variant="body2">
+            {svc === null
+              ? '连不上服务器,或者服务端还没部署这个开关。'
+              : svc.up
+                ? '订阅链接正常工作。'
+                : '所有订阅链接返回 404,跟"链接写错了"完全一样。家人拉不到订阅(客户端会保留上一次的配置)。'}
+          </Typography>
+        </Box>
+        <Button
+          variant="contained"
+          color={svc?.up ? 'error' : 'success'}
+          disabled={!!busy || svc === null}
+          startIcon={
+            busy === 'svc' ? <CircularProgress size={16} color="inherit" /> : <PowerSettingsNewRounded />
+          }
+          onClick={toggleService}
+        >
+          {svc?.up ? '关闭服务' : '开启服务'}
+        </Button>
+      </Card>
+
+      {/* ---- 工具条 ---- */}
+      <Card sx={{ p: 2, mb: 1.5 }}>
+        <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
           <Button
-            variant="contained"
-            size="large"
-            disabled={busy || !configured}
-            startIcon={
-              busy ? <CircularProgress size={18} color="inherit" /> : <CloudUploadRounded />
-            }
-            onClick={onPush}
+            variant="outlined"
+            disabled={!!busy}
+            startIcon={busy === 'scan' ? <CircularProgress size={16} /> : <RefreshRounded />}
+            onClick={scan}
           >
-            {busy ? '推送中…' : '推送美国节点'}
+            {scanned ? '重新扫描' : '扫描节点'}
           </Button>
 
-          <Box sx={{ minWidth: 0 }}>
-            {!configured ? (
-              <Typography variant="body2" color="text.secondary">
-                还没配置 —— 先在下面填好推送地址和密钥并保存。
-              </Typography>
-            ) : (
-              <Typography
-                variant="body2"
-                color="text.secondary"
-                sx={{ wordBreak: 'break-all' }}
-              >
-                推送到 {settings.pushUrl}
-              </Typography>
-            )}
-            {busy && progress && (
-              <Typography variant="body2" color="text.secondary">
-                {progress}
-              </Typography>
-            )}
-            {dirty && !busy && (
-              <Typography variant="body2" color="warning.main">
-                下面的设置改了还没保存,这次推送用的仍是已保存的那份。
-              </Typography>
-            )}
-          </Box>
+          <TextField
+            size="small"
+            placeholder="搜名称 / 域名 / IP"
+            sx={{ width: 200 }}
+            value={kw}
+            onChange={(e) => setKw(e.target.value)}
+          />
+          <TextField
+            size="small"
+            select
+            label="国家"
+            sx={{ width: 110 }}
+            value={cc}
+            onChange={(e) => setCc(e.target.value)}
+          >
+            <MenuItem value="ALL">全部</MenuItem>
+            {countries.map((c) => (
+              <MenuItem key={c} value={c}>
+                {c}
+              </MenuItem>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            select
+            label="协议"
+            sx={{ width: 110 }}
+            value={proto}
+            onChange={(e) => setProto(e.target.value)}
+          >
+            <MenuItem value="ALL">全部</MenuItem>
+            {protos.map((p) => (
+              <MenuItem key={p} value={p}>
+                {p}
+              </MenuItem>
+            ))}
+          </TextField>
+          <Button size="small" onClick={() => setOnlyAlive(!onlyAlive)}>
+            {onlyAlive ? '只看测过延迟的 ✓' : '只看测过延迟的'}
+          </Button>
+
+          <Box sx={{ flex: 1 }} />
+
+          <Button size="small" disabled={!shownPushable.length} onClick={() => setAll(true)}>
+            全选当前
+          </Button>
+          <Button size="small" disabled={!chosen.size} onClick={() => setAll(false)}>
+            取消当前
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!!busy || chosenRows.length === 0}
+            startIcon={
+              busy === 'push' ? <CircularProgress size={16} color="inherit" /> : <CloudUploadRounded />
+            }
+            onClick={push}
+          >
+            推送选中 {chosenRows.length}
+          </Button>
         </Box>
 
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-          推送用的是内核里已有的延迟数据,<b>不会自己重测</b>。所以先去「代理」页点测延迟,再回来推。
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+          共 {rows.length} 个节点,当前筛出 {shown.length} 个,选中 {chosenRows.length} 个。
+          延迟来自内核里已有的数据,<b>这一页不会自己重测</b> —— 要新的延迟先去「代理」页点测延迟。
+          {!geoReady && scanned && ' ⚠ GeoIP 库不可用,所有节点的国家都显示为未知。'}
+          {busy && progress ? ` · ${progress}` : ''}
         </Typography>
 
         {report && (
-          <Box
-            sx={{
-              mt: 2,
-              p: 1.5,
-              bgcolor: 'action.hover',
-              fontSize: 13,
-              lineHeight: 1.9,
-              borderRadius: 1,
-            }}
-          >
-            <div>可转换的节点:{report.total}</div>
-            <div>
-              GeoIP 确认美国:{report.us}
-              {report.mislabeled > 0 && (
-                <span style={{ opacity: 0.7 }}>
-                  （另有 {report.mislabeled} 个名字写着美国但 GeoIP 查出来不是）
-                </span>
-              )}
-            </div>
-            <div>延迟达标:{report.alive}</div>
-            <div>
-              已推送:<b>{report.pushed}</b>
-              {Object.keys(report.byProto).length > 0 && (
-                <span style={{ opacity: 0.7 }}>
-                  {' '}
-                  (
-                  {Object.entries(report.byProto)
-                    .map(([k, v]) => `${k} ${v}`)
-                    .join(' · ')}
-                  )
-                </span>
-              )}
-            </div>
-            {report.unverified > 0 && (
-              <div style={{ opacity: 0.7 }}>
-                无法核实(域名解析不了或 GeoIP 库里没有):{report.unverified}
-              </div>
+          <Box sx={{ mt: 1.5, p: 1.5, bgcolor: 'action.hover', borderRadius: 1, fontSize: 13 }}>
+            已推送 <b>{report.pushed}</b> 个
+            {Object.keys(report.byProto).length > 0 && (
+              <span style={{ opacity: 0.7 }}>
+                {' ('}
+                {Object.entries(report.byProto)
+                  .map(([k, v]) => `${k} ${v}`)
+                  .join(' · ')}
+                {')'}
+              </span>
             )}
             {!report.ok && <div style={{ marginTop: 6 }}>{report.message}</div>}
           </Box>
         )}
       </Card>
 
-      <Card sx={{ p: 2.5 }}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 2 }}>
-          设置
-        </Typography>
-
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, maxWidth: 560 }}>
-          <TextField
-            label="推送地址"
-            placeholder="https://你的域名/push"
-            size="small"
-            fullWidth
-            value={draft.pushUrl}
-            onChange={(e) => setDraft({ ...draft, pushUrl: e.target.value })}
-          />
-          <TextField
-            label="推送密钥"
-            placeholder="Deno Deploy 环境变量 PUSH_KEY"
-            size="small"
-            fullWidth
-            type="password"
-            value={draft.pushKey}
-            onChange={(e) => setDraft({ ...draft, pushKey: e.target.value })}
-          />
-
-          <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
-            <TextField
-              label="节点数上限"
-              size="small"
-              type="number"
-              value={draft.maxNodes}
-              onChange={(e) => setDraft({ ...draft, maxNodes: Number(e.target.value) })}
-            />
-            <TextField
-              label="延迟上限 (ms)"
-              size="small"
-              type="number"
-              value={draft.maxDelay}
-              onChange={(e) => setDraft({ ...draft, maxDelay: Number(e.target.value) })}
-            />
-            <TextField
-              label="最少节点数"
-              size="small"
-              type="number"
-              helperText="低于此数不推"
-              value={draft.minKeep}
-              onChange={(e) => setDraft({ ...draft, minKeep: Number(e.target.value) })}
-            />
-          </Box>
-
-          <Box>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={draft.geoipStrict}
-                  onChange={(e) => setDraft({ ...draft, geoipStrict: e.target.checked })}
-                />
-              }
-              label="严格模式:GeoIP 确认是美国才推"
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-              关掉之后,GeoIP 查不到的节点会退回看节点名判断。机场标错国家时会混进非美国节点。
-            </Typography>
-          </Box>
-
-          <Divider />
-
-          <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
-            <Button variant="contained" disabled={!dirty} onClick={onSave}>
-              保存设置
-            </Button>
-            <Button disabled={!dirty} onClick={() => setDraft(settings)}>
-              撤销改动
-            </Button>
-            <Typography variant="caption" color="text.secondary">
-              存在应用数据目录的 deno-push/settings.json,密钥不进仓库
-            </Typography>
-          </Box>
-        </Box>
+      {/* ---- 节点表 ---- */}
+      <Card sx={{ overflow: 'auto' }}>
+        {!scanned ? (
+          <Typography sx={{ p: 4, textAlign: 'center' }} color="text.secondary">
+            点「扫描节点」把内核当前加载的节点列出来。
+          </Typography>
+        ) : shown.length === 0 ? (
+          <Typography sx={{ p: 4, textAlign: 'center' }} color="text.secondary">
+            没有符合条件的节点。放宽一下过滤条件试试。
+          </Typography>
+        ) : (
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell padding="checkbox" />
+                <TableCell>名称</TableCell>
+                <TableCell>协议</TableCell>
+                <TableCell>服务器</TableCell>
+                <TableCell>IP</TableCell>
+                <TableCell>国家</TableCell>
+                <TableCell align="right">延迟</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {shown.map((r) => {
+                const ok = pushable(r)
+                return (
+                  <TableRow key={r.name} hover sx={{ opacity: ok ? 1 : 0.45 }}>
+                    <TableCell padding="checkbox">
+                      <Tooltip title={ok ? '' : '这个节点缺关键字段,转不出分享链接,推不了'}>
+                        <span>
+                          <Checkbox
+                            size="small"
+                            disabled={!ok}
+                            checked={chosen.has(r.name)}
+                            onChange={(_, v) => {
+                              const next = new Set(chosen)
+                              if (v) next.add(r.name)
+                              else next.delete(r.name)
+                              setChosen(next)
+                            }}
+                          />
+                        </span>
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {r.name}
+                    </TableCell>
+                    <TableCell>
+                      <Chip label={r.proto} size="small" variant="outlined" />
+                    </TableCell>
+                    <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      {r.server}:{r.port}
+                    </TableCell>
+                    <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      {r.ip ?? <span style={{ opacity: 0.5 }}>解析不了</span>}
+                    </TableCell>
+                    <TableCell>
+                      {r.cc ?? <span style={{ opacity: 0.5 }}>未知</span>}
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {r.delay > 0 ? `${r.delay} ms` : <span style={{ opacity: 0.5 }}>未测</span>}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )}
       </Card>
     </BasePage>
   )

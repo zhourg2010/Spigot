@@ -3,11 +3,15 @@ import { describe, expect, it } from 'vitest'
 import {
   type ClashProxy,
   countryOfIp,
+  DEFAULT_SETTINGS,
   ipToInt,
   isIpv4,
   looksUs,
+  type NodeRow,
   parseGeoDb,
+  pickForPush,
   roundRobin,
+  switchUrlOf,
   toShareUri,
   utf8ToBase64,
 } from './deno-push'
@@ -266,5 +270,73 @@ describe('roundRobin', () => {
       7,
     )
     expect(got).toHaveLength(7)
+  })
+})
+
+describe('pickForPush', () => {
+  const row = (o: Partial<NodeRow>): NodeRow => ({
+    name: 'n', proto: 'vless', server: 's', port: 443,
+    ip: '1.2.3.4', cc: 'US', delay: 100, uri: 'vless://x', ...o,
+  })
+
+  it('只要 GeoIP 确认的美国节点,别的国家一律不要', () => {
+    const got = pickForPush(
+      [row({ name: 'a', cc: 'US' }), row({ name: 'b', cc: 'JP' }), row({ name: 'c', cc: 'SG' })],
+      DEFAULT_SETTINGS,
+    )
+    expect(got.picked.map((r) => r.name)).toEqual(['a'])
+    expect(got.us).toBe(1)
+  })
+
+  it('严格模式下,GeoIP 查不到的不要 —— 哪怕名字写着美国', () => {
+    const got = pickForPush(
+      [row({ name: '🇺🇸 洛杉矶 01', cc: null })],
+      { ...DEFAULT_SETTINGS, geoipStrict: true },
+    )
+    expect(got.picked).toHaveLength(0)
+    expect(got.unverified).toBe(1)
+  })
+
+  it('非严格模式下,查不到才退回看名字', () => {
+    const got = pickForPush(
+      [row({ name: '🇺🇸 洛杉矶 01', cc: null }), row({ name: '东京 02', cc: null })],
+      { ...DEFAULT_SETTINGS, geoipStrict: false },
+    )
+    expect(got.picked.map((r) => r.name)).toEqual(['🇺🇸 洛杉矶 01'])
+  })
+
+  it('名字写着美国但 GeoIP 说不是 —— 计入 mislabeled,不推', () => {
+    const got = pickForPush([row({ name: 'US-LA-01', cc: 'HK' })], DEFAULT_SETTINGS)
+    expect(got.picked).toHaveLength(0)
+    expect(got.mislabeled).toBe(1)
+  })
+
+  it('没测过延迟的(delay=0)不算达标 —— 0 不能当成"极快"', () => {
+    const got = pickForPush([row({ name: 'a', delay: 0 })], DEFAULT_SETTINGS)
+    expect(got.us).toBe(1)      // 是美国节点
+    expect(got.alive).toBe(0)   // 但没有延迟数据,不推
+  })
+
+  it('超过延迟上限的不要,结果按延迟从快到慢', () => {
+    const got = pickForPush(
+      [row({ name: 'slow', delay: 900 }), row({ name: 'fast', delay: 80 }), row({ name: 'mid', delay: 300 })],
+      { ...DEFAULT_SETTINGS, maxDelay: 800 },
+    )
+    expect(got.picked.map((r) => r.name)).toEqual(['fast', 'mid'])
+  })
+})
+
+describe('switchUrlOf', () => {
+  it('从 /push 推出同域名的 /switch', () => {
+    expect(switchUrlOf('https://sub.example.com/push')).toBe('https://sub.example.com/switch')
+  })
+
+  it('push 地址带子路径也照样落到根上的 /switch', () => {
+    expect(switchUrlOf('https://x.com/a/b/push')).toBe('https://x.com/switch')
+  })
+
+  it('地址没填或不合法时返回 null,而不是拼出个假 URL', () => {
+    expect(switchUrlOf('')).toBeNull()
+    expect(switchUrlOf('不是网址')).toBeNull()
   })
 })

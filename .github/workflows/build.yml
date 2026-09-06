@@ -38,6 +38,28 @@ permissions:
   contents: write # 发 Release 需要
 
 jobs:
+  # 前端单元测试。**以前没有这个 job** —— 仓库里一直有 vitest 套件(含
+  # deno-push 的推送筛选逻辑),但没有任何东西跑它,等于白写。
+  #
+  # 单独一个 job 而不是塞进 build:它只要 Node,一分钟出结果;塞进 build 的话
+  # 要等 Rust 编译完才知道一个纯逻辑错误,而且四个平台各跑一遍纯属浪费。
+  # 也**不**让 build 依赖它:测试挂了照样出包,免得一个测试问题把你手里的
+  # 安装包也一起卡住 —— 但红叉会挂在那儿,看得见。
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+      - run: pnpm i
+      - run: pnpm test
+
   build:
     strategy:
       # 一个平台挂掉不影响其他平台继续出包
