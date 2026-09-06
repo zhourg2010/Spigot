@@ -1,4 +1,4 @@
-# rClash 的来源与改动说明
+# Spigot 的来源与改动说明
 
 ## 来源
 
@@ -139,7 +139,7 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
 | 文件 | 改了什么 |
 |---|---|
 | `scripts/portable.mjs` | 见下面三条 |
-| `.github/workflows/build.yml` | Windows 那个 job 加一步 `pnpm portable <target>`,产物路径加上 `rClash_*_portable.zip` |
+| `.github/workflows/build.yml` | Windows 那个 job 加一步 `pnpm portable <target>`,产物路径加上 `Spigot_*_portable.zip` |
 
 `portable.mjs` 上游那版**对本仓库是坏的**,三处:
 
@@ -148,8 +148,8 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
    工作区根**。改成 `./target/<triple>/release`。跟 `build.yml` 里缓存和产物路径栽过的
    是同一个坑。
 
-2. **主程序名硬编码成 `clash-verge.exe`。** 我们 `productName` 改成了 rClash,
-   `tauri build` 会把 cargo 产出的 `clash-verge.exe` 重命名成 `rClash.exe`。
+2. **主程序名硬编码成 `clash-verge.exe`。** 我们 `productName` 改成了 Spigot,
+   `tauri build` 会把 cargo 产出的 `clash-verge.exe` 重命名成 `Spigot.exe`。
    改成从 `tauri.conf.json` 读 `productName`,并保留 Cargo 包名当兜底 —— 万一以后
    Tauri 改了重命名行为,不至于莫名其妙找不到文件。找不到时会把目录里实际有哪些 `.exe`
    列出来,光一个 ENOENT 在 CI 日志里没法查。
@@ -201,7 +201,12 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
   回到了跟上游完全一致,新碰的两个导航文件都很小、改动都是**追加**在列表末尾,语言包那两处
   是往 JSON 对象里加一个键 —— 都属于最容易合的那种。
 
-## 改动内容(2026-08-25):改名为 rClash
+## 改动内容(2026-08-25 改名,2026-09-06 定名 Spigot)
+
+> **名字沿革:** 这一节最早改成的名字是 `rClash`,只在内部构建过一版就换掉了 ——
+> 名字里带 "Clash" 既容易被当成上游的官方分支,也让它在任何一台机器上都一眼可辨。
+> 现在的名字是 **Spigot**(水龙头/阀门):节点从这儿流向自建订阅服务,
+> Deno Push 页上那个 404 开关本质就是把阀门拧上。下面表格里的值都是当前值。
 
 上游的名字、应用 ID、开机自启任务名等等在系统里都是**全局唯一的键**。如果沿用上游的值,
 这个客户端和机器上已经装着的 Clash Verge Rev 会互相打架 —— 共用同一个配置目录、抢同一把
@@ -209,10 +214,10 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
 
 | 文件 | 改了什么 | 为什么必须改 |
 |---|---|---|
-| `src-tauri/tauri.conf.json` | `productName` → `rClash`<br>`identifier` → `io.github.zhourg2010.rclash` | identifier 决定应用数据目录和单实例锁 |
+| `src-tauri/tauri.conf.json` | `productName` → `Spigot`<br>`identifier` → `io.github.zhourg2010.spigot` | identifier 决定应用数据目录和单实例锁 |
 | `src-tauri/tauri.windows.conf.json` | 同上的 `identifier` | 两份配置里的 id 必须一致 |
 | `src-tauri/src/utils/dirs.rs` | `APP_ID` / `BACKUP_DIR` | 代码里直接用 APP_ID 拼数据目录,必须和 identifier 对齐 |
-| `src-tauri/src/utils/schtasks.rs` | 计划任务名 → `rClash` / `rClash (Admin)` | Windows 计划任务名全局唯一,同名会互相覆盖 |
+| `src-tauri/src/utils/schtasks.rs` | 计划任务名 → `Spigot` / `Spigot (Admin)` | Windows 计划任务名全局唯一,同名会互相覆盖 |
 | `src-tauri/src/utils/init.rs` | `clash://` 协议处理器的显示名 | 注册表里的显示名,改对即可(协议键本身共用是设计如此) |
 | `src-tauri/src/lib.rs`、`utils/resolve/window.rs` | 窗口标题 | 纯显示 |
 | `src-tauri/src/utils/macos_launch_guard.rs` | 一处兜底文件名 | 纯显示,基本走不到 |
@@ -232,7 +237,7 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
   它指的是**系统服务**(clash-verge-service)的真实 bundle id,那个组件确实叫这个名字,
   改了反而对不上。同理,界面文案里"Clash Verge 系统服务"那些字样也全部保留。
 
-**代价:** rClash 用的是全新的应用数据目录,第一次启动是空配置,不会继承 Clash Verge Rev
+**代价:** Spigot 用的是全新的应用数据目录,第一次启动是空配置,不会继承 Clash Verge Rev
 里已有的订阅和设置。两者可以并存,互不干扰。
 
 `#[cfg(test)]` 里那些用 `"Clash Verge.app"` 当路径夹具的测试**没有动** —— 它们测的是
@@ -243,7 +248,7 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
 | 改动 | 原因 |
 |---|---|
 | `bundle.createUpdaterArtifacts` → `false` | 生成更新包需要 `TAURI_SIGNING_PRIVATE_KEY`,那是上游的私钥,我们没有。开着必然构建失败。 |
-| `plugins.updater.endpoints` → 指向本仓库 | **这条是安全性的**:端点原本指向上游 clash-verge-rev 的 release。留着的话,「检查更新」会把 rClash 更新成官方 Clash Verge Rev 的构建 —— 推送按钮、改名、全部被覆盖掉。指回本仓库后该文件不存在,检查更新会失败,但绝不会把应用换成别人的构建。 |
+| `plugins.updater.endpoints` → 指向本仓库 | **这条是安全性的**:端点原本指向上游 clash-verge-rev 的 release。留着的话,「检查更新」会把 Spigot 更新成官方 Clash Verge Rev 的构建 —— 推送按钮、改名、全部被覆盖掉。指回本仓库后该文件不存在,检查更新会失败,但绝不会把应用换成别人的构建。(仓库拆分那阵这个端点一度还指着 `nodes-sub`,改名时一并修正成 `zhourg2010/Spigot`。) |
 
 想恢复自动更新的话,需要自己生成一对 minisign 密钥(`pnpm tauri signer generate`),
 把公钥填进 `plugins.updater.pubkey`,私钥作为 secret 传给 CI,并把
@@ -253,7 +258,7 @@ Anthropic 按 IP 段判定地区不给用。要判断那个得看响应正文,�
 
 改名和修改本身是 GPL-3.0 允许的。按 GPL-3.0 §5(a) 的要求,修改过的版本必须带有显著的
 修改说明 —— 本文件就是。`LICENSE` 原样保留,上游的版权声明也没有删。
-"rClash" 这个名字不代表上游作者的任何背书。
+"Spigot" 这个名字不代表上游作者的任何背书。
 
 ## 同步上游新版本的做法
 

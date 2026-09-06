@@ -14,15 +14,15 @@ import AdmZip from 'adm-zip'
  * 带走,订阅和设置都跟着走;删掉文件夹就干干净净,注册表和 %APPDATA% 里什么都不留。
  * (顺带:更新器在便携模式下会自动跳过,见 core/updater.rs。)
  *
- * 这份脚本是上游的,rClash 改了两处 —— 两处都是不改就直接跑不起来的:
+ * 这份脚本是上游的,Spigot 改了两处 —— 两处都是不改就直接跑不起来的:
  *
  *   1. release 目录:上游写的是 ./src-tauri/target/<triple>/release,但根目录的
  *      Cargo.toml 是 [workspace],src-tauri 只是成员之一,**Cargo 工作区的 target
  *      在工作区根目录**。所以是 ./target/<triple>/release。
  *      (build.yml 的缓存和产物路径栽在同一个坑上过,那边注释写得更细。)
  *
- *   2. 主程序文件名:上游是 clash-verge.exe;我们把 productName 改成了 rClash,
- *      tauri build 会把 cargo 产出的 clash-verge.exe 重命名成 rClash.exe。
+ *   2. 主程序文件名:上游是 clash-verge.exe;我们把 productName 改成了 Spigot,
+ *      tauri build 会把 cargo 产出的 clash-verge.exe 重命名成 Spigot.exe。
  *      这里不硬编码,从 tauri.conf.json 读 productName,并保留 Cargo 包名当兜底 ——
  *      万一以后 Tauri 改了重命名行为,不至于莫名其妙找不到文件。
  */
@@ -97,7 +97,7 @@ async function resolvePortable() {
   zip.addLocalFolder(configDir, '.config')
 
   const { version } = require('../package.json')
-  const zipFile = `rClash_${version}_${arch}_portable.zip`
+  const zipFile = `Spigot_${version}_${arch}_portable.zip`
   zip.writeZip(zipFile)
   console.log(`[INFO]: 便携版打包完成 -> ${zipFile}`)
 }

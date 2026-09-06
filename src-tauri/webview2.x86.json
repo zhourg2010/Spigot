@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "identifier": "io.github.zhourg2010.rclash",
+  "identifier": "io.github.zhourg2010.spigot",
   "bundle": {
     "targets": ["nsis"],
     "windows": {
@@ -25,7 +25,7 @@
       "active": true,
       "dialog": false,
       "endpoints": [
-        "https://github.com/zhourg2010/nodes-sub/releases/download/updater/update.json"
+        "https://github.com/zhourg2010/Spigot/releases/download/updater/update.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyOEMyRjBCQkVGOUJEREYKUldUZnZmbStDeStNMHU5Mmo1N24xQXZwSVRYbXA2NUpzZE5oVzlqeS9Bc0t6RVV4MmtwVjBZaHgK"
     }

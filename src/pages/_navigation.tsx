@@ -77,7 +77,7 @@ export const navItems: NavigationItem[] = [
     icon: [<SettingsOutlinedIcon key="mui" />, <SettingsSvg key="svg" />],
     Component: SettingPage,
   },
-  // rClash 新增,固定排在最后。上游每个条目都配了一套自绘 svg 图标,我们没有,
+  // Spigot 新增,固定排在最后。上游每个条目都配了一套自绘 svg 图标,我们没有,
   // 所以两个位置都用 MUI 那个 —— icon[1] 是折叠态用的,给 null 会渲染出个空洞。
   {
     ...navigationItems.denoPush,

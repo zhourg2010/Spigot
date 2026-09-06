@@ -6,20 +6,20 @@ use once_cell::sync::OnceCell;
 use std::{fs, path::PathBuf};
 use tauri::Manager as _;
 
-// rClash 改名:APP_ID 必须跟 tauri.conf.json 里的 identifier 一致。
+// Spigot 改名:APP_ID 必须跟 tauri.conf.json 里的 identifier 一致。
 // 换掉它不是为了好看 —— APP_ID 决定应用数据目录(配置、profiles、日志)和单实例锁的位置。
-// 沿用上游的 id 会让 rClash 跟机器上已经装着的 Clash Verge Rev 共用同一个目录、
+// 沿用上游的 id 会让 Spigot 跟机器上已经装着的 Clash Verge Rev 共用同一个目录、
 // 互相抢同一把单实例锁,两个应用直接打架。换成独立 id 之后两者可以并存,互不干扰。
-// 代价是 rClash 第一次启动是全新配置,不会继承 Clash Verge Rev 里已有的订阅。
+// 代价是 Spigot 第一次启动是全新配置,不会继承 Clash Verge Rev 里已有的订阅。
 #[cfg(not(feature = "verge-dev"))]
-pub static APP_ID: &str = "io.github.zhourg2010.rclash";
+pub static APP_ID: &str = "io.github.zhourg2010.spigot";
 #[cfg(not(feature = "verge-dev"))]
-pub static BACKUP_DIR: &str = "rclash-backup";
+pub static BACKUP_DIR: &str = "spigot-backup";
 
 #[cfg(feature = "verge-dev")]
-pub static APP_ID: &str = "io.github.zhourg2010.rclash.dev";
+pub static APP_ID: &str = "io.github.zhourg2010.spigot.dev";
 #[cfg(feature = "verge-dev")]
-pub static BACKUP_DIR: &str = "rclash-backup-dev";
+pub static BACKUP_DIR: &str = "spigot-backup-dev";
 
 pub static PORTABLE_FLAG: OnceCell<bool> = OnceCell::new();
 
