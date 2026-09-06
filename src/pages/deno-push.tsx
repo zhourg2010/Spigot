@@ -29,22 +29,15 @@ import {
   Box,
   Button,
   Card,
-  Checkbox,
-  Chip,
   CircularProgress,
   MenuItem,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
   TextField,
-  Tooltip,
   Typography,
 } from '@mui/material'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 
 import { BasePage } from '@/components/base'
+import NodeTable, { pushable } from '@/components/deno-push/node-table'
 import {
   DEFAULT_SETTINGS,
   type DenoPushSettings,
@@ -66,8 +59,8 @@ import {
 } from '@/services/deno-push'
 import { showNotice } from '@/services/notice-service'
 
-/** 节点能不能推。转不出分享链接的,推上去也是坏行。 */
-const pushable = (r: NodeRow) => !!r.uri
+/** 提到组件外:每行新建一个对象的话,React 每次渲染都要重新 diff 一遍 style。 */
+const DIM = { opacity: 0.45 }
 
 const DenoPushPage = () => {
   const [settings, setSettings] = useState<DenoPushSettings>(DEFAULT_SETTINGS)
@@ -118,8 +111,13 @@ const DenoPushPage = () => {
 
   const protos = useMemo(() => [...new Set(rows.map((r) => r.proto))].sort(), [rows])
 
+  // 500 个节点的过滤 + 重渲不该挡住打字。useDeferredValue 让输入框用最新值立刻回显,
+  // 表格用"落后一拍"的值在低优先级里重算 —— 中途再敲一个字符,上一轮直接作废。
+  // 比 debounce 好在:不用猜延迟多少毫秒合适,快机器上一点都不慢。
+  const deferredKw = useDeferredValue(kw)
+
   const shown = useMemo(() => {
-    const k = kw.trim().toLowerCase()
+    const k = deferredKw.trim().toLowerCase()
     return rows.filter((r) => {
       if (cc !== 'ALL' && (r.cc ?? '未知') !== cc) return false
       if (proto !== 'ALL' && r.proto !== proto) return false
@@ -135,9 +133,24 @@ const DenoPushPage = () => {
         (r.ip ?? '').includes(k)
       )
     })
-  }, [rows, kw, cc, proto, onlyAlive, reachFilter])
+  }, [rows, deferredKw, cc, proto, onlyAlive, reachFilter])
 
   const shownPushable = useMemo(() => shown.filter(pushable), [shown])
+
+  /**
+   * 服务器上那批也可能有几百行。不 memo 的话它会跟着整页一起重建 ——
+   * 包括**每敲一个搜索字符**,而那跟这个面板毫无关系。
+   */
+  const remoteList = useMemo(
+    () =>
+      remote?.nodes.map((n, i) => (
+        <div key={i} style={n.disabled ? DIM : undefined}>
+          {n.disabled ? '[停用] ' : ''}
+          {nameOfUri(n.uri) || n.uri.slice(0, 60)}
+        </div>
+      )),
+    [remote],
+  )
   const chosenRows = useMemo(() => rows.filter((r) => chosen.has(r.name) && pushable(r)), [rows, chosen])
 
   // ---------------- 动作 ----------------
@@ -239,13 +252,28 @@ const DenoPushPage = () => {
     }
   }
 
+  /**
+   * 必须是稳定引用 —— 它是传给表格里每一行的 prop,引用一变 memo 就全失效,
+   * 勾一个框会重渲当前视口里所有行。函数式 setState 让它不依赖 chosen。
+   */
+  const toggleOne = useCallback((name: string) => {
+    setChosen((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }, [])
+
   const setAll = (on: boolean) => {
-    const next = new Set(chosen)
-    for (const r of shownPushable) {
-      if (on) next.add(r.name)
-      else next.delete(r.name)
-    }
-    setChosen(next)
+    setChosen((prev) => {
+      const next = new Set(prev)
+      for (const r of shownPushable) {
+        if (on) next.add(r.name)
+        else next.delete(r.name)
+      }
+      return next
+    })
   }
 
   // ---------------- 渲染 ----------------
@@ -475,18 +503,15 @@ const DenoPushPage = () => {
               lineHeight: 1.8,
             }}
           >
-            {remote.nodes.map((n, i) => (
-              <div key={i} style={{ opacity: n.disabled ? 0.45 : 1 }}>
-                {n.disabled ? '[停用] ' : ''}
-                {nameOfUri(n.uri) || n.uri.slice(0, 60)}
-              </div>
-            ))}
+            {remoteList}
           </Box>
         </Card>
       )}
 
       {/* ---- 节点表 ---- */}
-      <Card sx={{ overflow: 'auto' }}>
+      {/* 滚动由 NodeTable 自己管(它要虚拟化,得知道自己的滚动容器是哪个)。
+          这里再套一层 overflow:auto 会出现两个滚动条抢事件。 */}
+      <Card sx={{ overflow: 'hidden' }}>
         {!scanned ? (
           <Typography sx={{ p: 4, textAlign: 'center' }} color="text.secondary">
             点「扫描节点」把内核当前加载的节点列出来。
@@ -496,87 +521,7 @@ const DenoPushPage = () => {
             没有符合条件的节点。放宽一下过滤条件试试。
           </Typography>
         ) : (
-          <Table size="small" stickyHeader>
-            <TableHead>
-              <TableRow>
-                <TableCell padding="checkbox" />
-                <TableCell>名称</TableCell>
-                <TableCell>协议</TableCell>
-                <TableCell>服务器</TableCell>
-                <TableCell>IP</TableCell>
-                <TableCell>国家</TableCell>
-                <TableCell align="right">延迟</TableCell>
-                <TableCell align="center">可达</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {shown.map((r) => {
-                const ok = pushable(r)
-                return (
-                  <TableRow key={r.name} hover sx={{ opacity: ok ? 1 : 0.45 }}>
-                    <TableCell padding="checkbox">
-                      <Tooltip title={ok ? '' : '这个节点缺关键字段,转不出分享链接,推不了'}>
-                        <span>
-                          <Checkbox
-                            size="small"
-                            disabled={!ok}
-                            checked={chosen.has(r.name)}
-                            onChange={(_, v) => {
-                              const next = new Set(chosen)
-                              if (v) next.add(r.name)
-                              else next.delete(r.name)
-                              setChosen(next)
-                            }}
-                          />
-                        </span>
-                      </Tooltip>
-                    </TableCell>
-                    <TableCell sx={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {r.name}
-                    </TableCell>
-                    <TableCell>
-                      <Chip label={r.proto} size="small" variant="outlined" />
-                    </TableCell>
-                    <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      {r.server}:{r.port}
-                    </TableCell>
-                    <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      {r.ip ?? <span style={{ opacity: 0.5 }}>解析不了</span>}
-                    </TableCell>
-                    <TableCell>
-                      {r.cc ?? <span style={{ opacity: 0.5 }}>未知</span>}
-                    </TableCell>
-                    <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-                      {r.delay > 0 ? `${r.delay} ms` : <span style={{ opacity: 0.5 }}>未测</span>}
-                    </TableCell>
-                    <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
-                      {REACH_TARGETS.map((t) => {
-                        const v = r.reach?.[t.key]
-                        // undefined = 没测过,显示灰点;0 = 测了不通;>0 = 通
-                        const color = v === undefined ? '#c7c7cc' : v > 0 ? '#34c759' : '#ff3b30'
-                        const tip =
-                          v === undefined ? `${t.label}:没测过` : v > 0 ? `${t.label}:${v} ms` : `${t.label}:连不上`
-                        return (
-                          <Tooltip key={t.key} title={tip}>
-                            <span
-                              style={{
-                                display: 'inline-block',
-                                width: 7,
-                                height: 7,
-                                borderRadius: '50%',
-                                background: color,
-                                margin: '0 2px',
-                              }}
-                            />
-                          </Tooltip>
-                        )
-                      })}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
+          <NodeTable rows={shown} chosen={chosen} onToggle={toggleOne} />
         )}
       </Card>
     </BasePage>

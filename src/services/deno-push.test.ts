@@ -4,8 +4,10 @@ import {
   type ClashProxy,
   countryOfIp,
   DEFAULT_SETTINGS,
+  geoCodeAt,
   ipToInt,
   isIpv4,
+  mapPool,
   looksUs,
   nameOfUri,
   type NodeRow,
@@ -62,14 +64,15 @@ describe('parseGeoDb / countryOfIp', () => {
     ].join('\n')
 
     const parsed = parseGeoDb(db)
-    expect(parsed.starts).toHaveLength(3)
-    expect(parsed.codes).toEqual(['US', 'CA', 'JP'])
+    expect(parsed.len).toBe(3)
+    // codes 是打包过的 Uint16Array,不能直接跟字符串比 —— 走 geoCodeAt 解出来
+    expect([0, 1, 2].map((i) => geoCodeAt(parsed, i))).toEqual(['US', 'CA', 'JP'])
 
     // countryOfIp 用的是模块级的 geoDb,这里直接验解析结果 + 二分的边界语义
     const find = (ip: string): string | null => {
       const n = ipToInt(ip)
       let lo = 0
-      let hi = parsed.starts.length - 1
+      let hi = parsed.len - 1
       let hit = -1
       while (lo <= hi) {
         const mid = (lo + hi) >> 1
@@ -81,7 +84,7 @@ describe('parseGeoDb / countryOfIp', () => {
         }
       }
       if (hit < 0) return null
-      return n <= parsed.ends[hit] ? parsed.codes[hit] : null
+      return n <= parsed.ends[hit] ? geoCodeAt(parsed, hit) : null
     }
 
     expect(find('1.2.3.4')).toBe('US')
@@ -99,7 +102,8 @@ describe('parseGeoDb / countryOfIp', () => {
 
   it('忽略格式坏掉的行,不整体崩', () => {
     const parsed = parseGeoDb('这不是一行合法数据\n\n123,456,US\nabc,def,XX\n')
-    expect(parsed.codes).toEqual(['US'])
+    expect(parsed.len).toBe(1)
+    expect(geoCodeAt(parsed, 0)).toBe('US')
   })
 })
 
@@ -356,5 +360,85 @@ describe('nameOfUri', () => {
   it('百分号编码坏掉时返回原文,不抛异常', () => {
     // 单独一个 % 会让 decodeURIComponent 抛 URIError,不能让它把整页搞崩
     expect(nameOfUri('vless://x@1.2.3.4:443#bad%zz')).toBe('bad%zz')
+  })
+})
+
+describe('mapPool', () => {
+  it('结果按输入顺序排列,跟完成顺序无关', async () => {
+    // 故意让前面的慢、后面的快:如果实现是按完成顺序 push,这个断言会挂
+    const delays = [30, 1, 20, 1, 10]
+    const out = await mapPool(delays, 3, async (ms, i) => {
+      await new Promise((r) => setTimeout(r, ms))
+      return i
+    })
+    expect(out).toEqual([0, 1, 2, 3, 4])
+  })
+
+  it('并发数不超过上限,而且每个任务都跑到', async () => {
+    let running = 0
+    let peak = 0
+    const items = Array.from({ length: 20 }, (_, i) => i)
+    const out = await mapPool(items, 4, async (i) => {
+      running++
+      peak = Math.max(peak, running)
+      await new Promise((r) => setTimeout(r, 1))
+      running--
+      return i * 2
+    })
+    expect(peak).toBeLessThanOrEqual(4)
+    expect(out).toHaveLength(20)
+    expect(out[19]).toBe(38)
+  })
+
+  it('慢任务不挡快任务 —— 这正是从"切批次"改成并发池的理由', async () => {
+    // 一个 100ms 的慢任务 + 五个 1ms 的快任务,并发 2。
+    // 切批次的话(每批 2 个)总耗时 ≈ 100 + 1 + 1 = 102ms 起步;
+    // 并发池里慢的那个自己占一个 worker,另一个 worker 把五个快的全跑完。
+    const t0 = Date.now()
+    await mapPool([100, 1, 1, 1, 1, 1], 2, async (ms) => {
+      await new Promise((r) => setTimeout(r, ms))
+    })
+    // 只断言"没有被慢任务串行拖成两倍",不卡死具体毫秒数(CI 机器抖动很大)
+    expect(Date.now() - t0).toBeLessThan(180)
+  })
+
+  it('空输入不挂起', async () => {
+    await expect(mapPool([], 4, async () => 1)).resolves.toEqual([])
+  })
+
+  it('进度回调的 done 是递增的,最后一次等于总数', async () => {
+    const seen: number[] = []
+    await mapPool([1, 1, 1, 1, 1], 2, async () => 0, (done) => seen.push(done))
+    expect(seen).toHaveLength(5)
+    expect([...seen].sort((a, b) => a - b)).toEqual(seen)
+    expect(seen.at(-1)).toBe(5)
+  })
+})
+
+describe('parseGeoDb 的边界', () => {
+  it('最后一行没有换行也要收进去', () => {
+    const parsed = parseGeoDb('1,10,US\n11,20,CA')
+    expect(parsed.len).toBe(2)
+    expect(geoCodeAt(parsed, 1)).toBe('CA')
+  })
+
+  it('国家码被行尾截断的行直接丢掉,不拿下一行的字符凑数', () => {
+    // 'U' 后面就换行了 —— 老实现会去读 \n 当第二个字符,拼出个鬼东西
+    const parsed = parseGeoDb('1,10,U\n11,20,CA\n')
+    expect(parsed.len).toBe(1)
+    expect(geoCodeAt(parsed, 0)).toBe('CA')
+  })
+
+  it('IP 超出 uint32 范围的行丢掉,不让它被静默截断', () => {
+    // 4294967296 = 2^32,存进 Uint32Array 会变成 0,区间就彻底错了
+    const parsed = parseGeoDb('1,4294967296,US\n5,10,CA\n')
+    expect(parsed.len).toBe(1)
+    expect(geoCodeAt(parsed, 0)).toBe('CA')
+  })
+
+  it('起止颠倒的行丢掉', () => {
+    const parsed = parseGeoDb('100,5,US\n5,10,CA\n')
+    expect(parsed.len).toBe(1)
+    expect(geoCodeAt(parsed, 0)).toBe('CA')
   })
 })
