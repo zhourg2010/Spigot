@@ -19,7 +19,9 @@
  */
 
 import {
+  CloudDownloadRounded,
   CloudUploadRounded,
+  NetworkCheckRounded,
   PowerSettingsNewRounded,
   RefreshRounded,
 } from '@mui/icons-material'
@@ -50,11 +52,17 @@ import {
   loadSettings,
   type NodeRow,
   pickForPush,
+  fetchRemotePool,
+  nameOfUri,
   type PushReport,
   pushRows,
+  REACH_TARGETS,
+  type ReachKey,
+  type RemotePool,
   scanNodes,
   type ServiceState,
   setServiceState,
+  testReach,
 } from '@/services/deno-push'
 import { showNotice } from '@/services/notice-service'
 
@@ -81,6 +89,11 @@ const DenoPushPage = () => {
   const [onlyAlive, setOnlyAlive] = useState(true)
 
   const [svc, setSvc] = useState<ServiceState | null>(null)
+
+  /** 可达性过滤:选了哪个目标就只留对它通的。'' = 不按可达性过滤 */
+  const [reachFilter, setReachFilter] = useState<ReachKey | ''>('')
+  /** 服务器上现在那批。null = 还没拉过 */
+  const [remote, setRemote] = useState<RemotePool | null>(null)
 
   useEffect(() => {
     loadSettings().then((s) => {
@@ -111,6 +124,9 @@ const DenoPushPage = () => {
       if (cc !== 'ALL' && (r.cc ?? '未知') !== cc) return false
       if (proto !== 'ALL' && r.proto !== proto) return false
       if (onlyAlive && r.delay <= 0) return false
+      // 可达性:只留测过**并且通**的。没测过(undefined)也排除 ——
+      // 把"没测过"当成通过,等于这个过滤器什么也没干,还给人一种筛过了的错觉。
+      if (reachFilter && !(r.reach?.[reachFilter] ?? 0)) return false
       if (!k) return true
       // 名字、服务器域名、IP 一起搜 —— 想按 IP 段挑的时候直接敲 "104." 就行
       return (
@@ -119,7 +135,7 @@ const DenoPushPage = () => {
         (r.ip ?? '').includes(k)
       )
     })
-  }, [rows, kw, cc, proto, onlyAlive])
+  }, [rows, kw, cc, proto, onlyAlive, reachFilter])
 
   const shownPushable = useMemo(() => shown.filter(pushable), [shown])
   const chosenRows = useMemo(() => rows.filter((r) => chosen.has(r.name) && pushable(r)), [rows, chosen])
@@ -166,6 +182,43 @@ const DenoPushPage = () => {
     } finally {
       setBusy('')
       setProgress('')
+    }
+  }
+
+  const runReach = async (key: ReachKey) => {
+    if (busy) return
+    // 只测当前筛出来的。全测的话几百个节点 × 5 秒超时,等到天黑。
+    const targets = shown
+    if (targets.length === 0) return
+    setBusy('reach')
+    try {
+      const label = REACH_TARGETS.find((t) => t.key === key)!.label
+      const updated = await testReach(targets, key, 5000, (done, total) =>
+        setProgress(`测 ${label} 可达性 ${done}/${total}…`),
+      )
+      // 只把测过的那些合并回总表,没测的行保持原样
+      const byName = new Map(updated.map((r) => [r.name, r]))
+      setRows(rows.map((r) => byName.get(r.name) ?? r))
+      const ok = updated.filter((r) => r.reach?.[key]).length
+      showNotice.success(`${label}:${targets.length} 个里 ${ok} 个连得上`)
+    } catch (e) {
+      showNotice.error(`测试失败: ${String(e)}`)
+    } finally {
+      setBusy('')
+      setProgress('')
+    }
+  }
+
+  const pullRemote = async () => {
+    if (busy) return
+    setBusy('pull')
+    try {
+      const pool = await fetchRemotePool(settings)
+      setRemote(pool)
+    } catch (e) {
+      showNotice.error(`拉取失败: ${String(e)}`)
+    } finally {
+      setBusy('')
     }
   }
 
@@ -303,6 +356,21 @@ const DenoPushPage = () => {
           <Button size="small" onClick={() => setOnlyAlive(!onlyAlive)}>
             {onlyAlive ? '只看测过延迟的 ✓' : '只看测过延迟的'}
           </Button>
+          <TextField
+            size="small"
+            select
+            label="可达"
+            sx={{ width: 120 }}
+            value={reachFilter}
+            onChange={(e) => setReachFilter(e.target.value as ReachKey | '')}
+          >
+            <MenuItem value="">不限</MenuItem>
+            {REACH_TARGETS.map((t) => (
+              <MenuItem key={t.key} value={t.key}>
+                {t.label} 通
+              </MenuItem>
+            ))}
+          </TextField>
 
           <Box sx={{ flex: 1 }} />
 
@@ -324,10 +392,45 @@ const DenoPushPage = () => {
           </Button>
         </Box>
 
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: 1.5 }}>
+          <Typography variant="body2" color="text.secondary">
+            测可达性(只测当前筛出的 {shown.length} 个):
+          </Typography>
+          {REACH_TARGETS.map((t) => (
+            <Button
+              key={t.key}
+              size="small"
+              variant="outlined"
+              disabled={!!busy || shown.length === 0}
+              startIcon={
+                busy === 'reach' ? <CircularProgress size={14} /> : <NetworkCheckRounded fontSize="small" />
+              }
+              onClick={() => runReach(t.key)}
+            >
+              {t.label}
+            </Button>
+          ))}
+          <Box sx={{ flex: 1 }} />
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!!busy}
+            startIcon={
+              busy === 'pull' ? <CircularProgress size={14} /> : <CloudDownloadRounded fontSize="small" />
+            }
+            onClick={pullRemote}
+          >
+            看服务器上现在有什么
+          </Button>
+        </Box>
+
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
           共 {rows.length} 个节点,当前筛出 {shown.length} 个,选中 {chosenRows.length} 个。
           延迟来自内核里已有的数据,<b>这一页不会自己重测</b> —— 要新的延迟先去「代理」页点测延迟。
           {!geoReady && scanned && ' ⚠ GeoIP 库不可用,所有节点的国家都显示为未知。'}
+          <br />
+          可达性测的是<b>网络层连不连得通</b>,不是"有没有被区域封锁" ——
+          连得上但对方按 IP 拒绝服务(常见于 Claude / ChatGPT)这里看不出来。它能帮你排除明显不通的,不保证能用。
           {busy && progress ? ` · ${progress}` : ''}
         </Typography>
 
@@ -347,6 +450,40 @@ const DenoPushPage = () => {
           </Box>
         )}
       </Card>
+
+      {/* ---- 服务器上现在那批 ---- */}
+      {remote && (
+        <Card sx={{ p: 2, mb: 1.5 }}>
+          <Typography sx={{ fontWeight: 700, mb: 0.5 }}>
+            服务器上现在有 {remote.count} 个节点
+            {remote.nodes.length > remote.count && (
+              <span style={{ opacity: 0.6, fontWeight: 400 }}>
+                {' '}(另有 {remote.nodes.length - remote.count} 个在后台被停用了)
+              </span>
+            )}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            最后一次推送:{remote.updatedAt ? new Date(remote.updatedAt).toLocaleString() : '未知'}
+          </Typography>
+          <Box
+            sx={{
+              mt: 1,
+              maxHeight: 180,
+              overflow: 'auto',
+              fontFamily: 'monospace',
+              fontSize: 11.5,
+              lineHeight: 1.8,
+            }}
+          >
+            {remote.nodes.map((n, i) => (
+              <div key={i} style={{ opacity: n.disabled ? 0.45 : 1 }}>
+                {n.disabled ? '[停用] ' : ''}
+                {nameOfUri(n.uri) || n.uri.slice(0, 60)}
+              </div>
+            ))}
+          </Box>
+        </Card>
+      )}
 
       {/* ---- 节点表 ---- */}
       <Card sx={{ overflow: 'auto' }}>
@@ -369,6 +506,7 @@ const DenoPushPage = () => {
                 <TableCell>IP</TableCell>
                 <TableCell>国家</TableCell>
                 <TableCell align="right">延迟</TableCell>
+                <TableCell align="center">可达</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -410,6 +548,29 @@ const DenoPushPage = () => {
                     </TableCell>
                     <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                       {r.delay > 0 ? `${r.delay} ms` : <span style={{ opacity: 0.5 }}>未测</span>}
+                    </TableCell>
+                    <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
+                      {REACH_TARGETS.map((t) => {
+                        const v = r.reach?.[t.key]
+                        // undefined = 没测过,显示灰点;0 = 测了不通;>0 = 通
+                        const color = v === undefined ? '#c7c7cc' : v > 0 ? '#34c759' : '#ff3b30'
+                        const tip =
+                          v === undefined ? `${t.label}:没测过` : v > 0 ? `${t.label}:${v} ms` : `${t.label}:连不上`
+                        return (
+                          <Tooltip key={t.key} title={tip}>
+                            <span
+                              style={{
+                                display: 'inline-block',
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: color,
+                                margin: '0 2px',
+                              }}
+                            />
+                          </Tooltip>
+                        )
+                      })}
                     </TableCell>
                   </TableRow>
                 )

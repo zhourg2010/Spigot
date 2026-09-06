@@ -35,7 +35,7 @@ import { fetch } from '@tauri-apps/plugin-http'
 // 必须是 * as,不能是默认导入:js-yaml 5.x 的 ESM 构建只有具名导出,没有 default。
 // 仓库里其余 5 处用的也都是这个写法(见 proxies-editor-viewer.tsx 等)。
 import * as yaml from 'js-yaml'
-import { getProxies } from 'tauri-plugin-mihomo-api'
+import { delayProxyByName, getProxies } from 'tauri-plugin-mihomo-api'
 
 // ---------------------------------------------------------------- 设置
 
@@ -690,6 +690,121 @@ export async function pushRows(
   } catch (e) {
     return { ...base, message: `推送出错: ${String(e)}` }
   }
+}
+
+// ---------------------------------------------------------------- 从服务器拉回来
+//
+// 对应 Deno 端的 GET /push。用途是"看看服务器上现在到底是哪些节点" ——
+// 推完之后确认一下、或者本地内核换了一批订阅之后想知道差在哪。
+//
+// **不读订阅链接**:那些链接经过协议过滤、数量截断、停用剔除,拿到的是加工过的结果;
+// 原样推回去会把加工固化(比如某条链接只发 vless,拉回去再推,别的协议就永久没了)。
+// GET /push 给的是原样的池子。
+
+export interface RemoteNode {
+  uri: string
+  /** 在后台被手动停用了。原样推回去时必须保持,不然等于替用户把它启用了 */
+  disabled: boolean
+}
+
+export interface RemotePool {
+  updatedAt: number
+  /** 可用的条数,不含停用的 */
+  count: number
+  nodes: RemoteNode[]
+}
+
+export async function fetchRemotePool(settings: DenoPushSettings): Promise<RemotePool> {
+  if (!settings.pushUrl || !settings.pushKey) throw new Error('还没配好推送地址和密钥')
+  const url = settings.pushUrl + (settings.pushUrl.includes('?') ? '&' : '?') + 'format=json'
+  const r = await fetch(url, {
+    headers: { authorization: `Bearer ${settings.pushKey}` },
+    connectTimeout: 20000,
+  })
+  if (!r.ok) {
+    // 405 基本可以确定是服务端还没部署带 GET 的那一版
+    const hint = r.status === 405 ? '(服务端可能还没更新到支持 GET /push 的版本)' : ''
+    throw new Error(`HTTP ${r.status} ${hint}: ${(await r.text()).slice(0, 120)}`)
+  }
+  return (await r.json()) as RemotePool
+}
+
+/** 从分享链接里抠出节点名(# 后面那段)。抠不出来就返回空串。 */
+export function nameOfUri(uri: string): string {
+  const h = uri.indexOf('#')
+  if (h < 0) return ''
+  try {
+    return decodeURIComponent(uri.slice(h + 1))
+  } catch {
+    return uri.slice(h + 1)
+  }
+}
+
+// ---------------------------------------------------------------- 服务可达性
+//
+// **先把话说清楚:这测的是"连不连得上",不是"解不解锁"。**
+//
+// 做法是让内核拿每个节点去拨一次目标站点(mihomo 的 delayProxyByName,就是测延迟
+// 用的那个接口,只是把测试 URL 换成 claude.ai 之类)。拨得通 = 这条链路能到那台
+// 服务器;拨不通 = 网络层就到不了(被墙、被机场屏蔽、节点本身死了)。
+//
+// 它**测不出**"能连上但对方拒绝服务"这种情况 —— 比如节点在新加坡,claude.ai 连得上,
+// 但 Anthropic 按 IP 段判定地区不给用。真要判断那个,得看响应正文,而前端没法把
+// 任意节点当代理去发一个能读正文的请求(内核只按当前选中的节点走)。
+//
+// 所以这个过滤器的定位是"排除明显不通的",不是"保证能用"。界面上也是这么写的。
+
+export const REACH_TARGETS = [
+  { key: 'claude', label: 'Claude', url: 'https://claude.ai/' },
+  { key: 'gpt', label: 'ChatGPT', url: 'https://chatgpt.com/' },
+  { key: 'gemini', label: 'Gemini', url: 'https://gemini.google.com/' },
+] as const
+
+export type ReachKey = (typeof REACH_TARGETS)[number]['key']
+
+/**
+ * 逐个节点测对某个目标站点的可达性,把结果写回 rows(返回新数组,不改原对象)。
+ *
+ * 慢是必然的:每个节点都要真拨一次。所以
+ *   - 只测**传进来的这批**(界面上只测当前筛出来的,不是全部)
+ *   - 并发 8 个。再高会把内核和出口带宽打满,反而测出一堆假的超时
+ *   - 每测完一批就 onTick 一次,界面能看到进度,不至于卡着不动像死了
+ */
+export async function testReach(
+  rows: NodeRow[],
+  key: ReachKey,
+  timeout = 5000,
+  onTick?: (done: number, total: number) => void,
+): Promise<NodeRow[]> {
+  const target = REACH_TARGETS.find((t) => t.key === key)
+  if (!target) throw new Error(`不认识的测试目标: ${key}`)
+
+  const out = rows.map((r) => ({ ...r, reach: { ...(r.reach ?? {}) } }))
+  const CONCURRENCY = 8
+  let done = 0
+
+  for (let i = 0; i < out.length; i += CONCURRENCY) {
+    const batch = out.slice(i, i + CONCURRENCY)
+    await Promise.all(
+      batch.map(async (r) => {
+        try {
+          const d = await delayProxyByName(r.name, target.url, timeout)
+          // 插件返回的形状各版本略有出入,取到数字就算数,取不到当 0(不通)
+          const ms = typeof d === 'number' ? d : Number((d as { delay?: number })?.delay ?? 0)
+          r.reach![key] = Number.isFinite(ms) && ms > 0 ? ms : 0
+        } catch {
+          // 超时/拒绝/内核报错一律当成不通。这里**不能**留 undefined ——
+          // undefined 的含义是"还没测过",跟"测了但不通"是两回事,
+          // 混起来的话过滤器会把没测过的当成通过。
+          r.reach![key] = 0
+        }
+      }),
+    )
+    done += batch.length
+    onTick?.(Math.min(done, out.length), out.length)
+  }
+
+  return out
 }
 
 // ---------------------------------------------------------------- 服务总开关
