@@ -21,18 +21,59 @@ nodes-sub 那边的 `client/` 和 `build-client.yml` 已经删掉，只在 READM
 
 在代理页面加了一个「一键推送美国节点到自建 Deno 订阅服务」的按钮，位置在测延迟按钮旁边。
 
-改动刻意做得很薄，**只碰了上游一个文件、共 5 行**，其余全是新增文件 —— 这样以后同步上游
-新版本时几乎不会有冲突。
+> 2026-08-27 改成了侧边栏独立一页,见下面那一节。这里保留原始记录。
 
 | 文件 | 性质 | 说明 |
 |---|---|---|
 | `src/services/deno-push.ts` | 新增 | 全部逻辑：读节点、解析、GeoIP 筛美国、选点、推送 |
-| `src/components/proxy/deno-push-button.tsx` | 新增 | 按钮和设置面板 |
+| `src/components/proxy/deno-push-button.tsx` | 新增 | 按钮和设置面板(后来删了) |
 | `src/services/deno-push.test.ts` | 新增 | 单元测试 |
-| `src/components/proxy/proxy-head.tsx` | **修改（+5 行）** | 一句 import + 三行渲染按钮 |
+| `src/components/proxy/proxy-head.tsx` | 修改（+5 行） | 一句 import + 三行渲染按钮(后来撤回了) |
 | `.github/workflows/` | 替换 | 上游自己的发布/签名/公证/更新器/TG 通知流程，自用不需要，全部删掉。<br>本仓库的构建流程是新写的 `.github/workflows/build.yml` |
 
 除此之外没有改动上游代码。
+
+## 改动内容(2026-08-27):推送功能改成侧边栏独立一页
+
+原来是代理页顶部那排按钮里的一个小图标 + 一个弹窗。现在是左边导航栏**最后一项「Deno Push」**。
+
+理由是弹窗太挤:设置有六项、推送报告有六行,两样挤在一个 460px 的对话框里,而且报告得先
+点开设置才看得到。摊成一页之后还能把「先测延迟再推送」这条前提直接写在页面上,而不是藏在
+弹窗底部的小字里。
+
+`src/services/deno-push.ts` **一行没改** —— 换掉的只是界面。
+
+| 文件 | 性质 | 说明 |
+|---|---|---|
+| `src/pages/deno-push.tsx` | 新增 | 整页:推送按钮 + 报告 + 设置表单 |
+| `src/components/proxy/deno-push-button.tsx` | **删除** | 被上面那一页取代 |
+| `src/components/proxy/proxy-head.tsx` | **撤回改动** | 我们加的 5 行去掉了,这个文件现在**跟上游一模一样** |
+| `src/pages/_navigation-meta.ts` | 修改(+6 行) | 加一条 `denoPush` |
+| `src/pages/_navigation.tsx` | 修改(+12 行) | 导入页面、加图标和条目 |
+| `src/locales/en/layout.json`<br>`src/locales/zh/layout.json` | 修改(各 +1 行) | 导航标签 `"denoPush": "Deno Push"` |
+| `src/types/generated/i18n-*.ts` | 生成物 | `node scripts/generate-i18n-keys.mjs` 重新生成,不用手改 |
+
+几个当时想清楚了的点,免得以后重踩:
+
+- **为什么排在最后不用额外处理**:侧边栏顺序是用户可拖拽、存在配置里的。
+  `use-nav-menu-order.ts` 的 `resolveMenuOrder` 会把「存下来的顺序里没有的 path」按
+  `navItems` 的顺序补在**末尾**,所以老用户升级上来这一项自然排最后,不会插到中间。
+
+- **为什么语言包只改 en 和 zh**:`t()` 是**强类型**的,类型由
+  `scripts/generate-i18n-keys.mjs` 从 `src/locales/en` 生成 —— 所以 en 必须有,
+  不然 `t('...denoPush')` 直接编译不过。而运行时 `fallbackLng` 是 `zh`,另外 11 种
+  语言查不到时会落到 zh。两个都填 `"Deno Push"`,13 种语言就全覆盖了。
+  (名字是专有名词,本来也不需要翻译。)
+
+- **图标给了两个一样的**:`icon` 是个数组,`[0]` 是展开态的 MUI 图标,`[1]` 是折叠态
+  用的自绘 svg。上游每一项都配了一套 svg,我们没有,`[1]` 给 null 会渲染出一个空洞,
+  所以两个位置都用 `CloudUploadOutlinedIcon`。
+
+- **路由不用动**:`_routers.tsx` 是从 `navItems` 生成的,加了导航项路由自动就有了。
+
+- **上游冲突面变大了一点**:从「1 个文件 5 行」变成「4 个上游文件」。但 `proxy-head.tsx`
+  回到了跟上游完全一致,新碰的两个导航文件都很小、改动都是**追加**在列表末尾,语言包那两处
+  是往 JSON 对象里加一个键 —— 都属于最容易合的那种。
 
 ## 改动内容(2026-08-25):改名为 rClash
 
@@ -114,10 +155,10 @@ pnpm i && pnpm typecheck && pnpm test && pnpm lint
 
 ## 使用方法
 
-1. 打开代理页面，先点**测延迟**按钮（推送用的是内核里已有的延迟数据，不会自己重测）
-2. 点旁边的**上传图标**：
-   - 第一次会弹设置，填 Deno 的 `/push` 地址和 `PUSH_KEY`
-   - 之后单击即推送，**右键**可以再改设置
+1. 打开**代理**页，先点**测延迟**按钮（推送用的是内核里已有的延迟数据，不会自己重测）
+2. 切到左边导航栏最下面的 **Deno Push** 页：
+   - 第一次先在下半部分的「设置」里填 Deno 的 `/push` 地址和 `PUSH_KEY`，点保存
+   - 然后点「推送美国节点」。这一轮的统计就显示在按钮下面
 
 设置存在系统的应用数据目录下 `deno-push/settings.json`（不在本仓库里，密钥不会进 git）。
 

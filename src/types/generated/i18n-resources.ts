@@ -205,6 +205,7 @@ export interface TranslationResources {
           }
           tabs: {
             connections: string
+            denoPush: string
             home: string
             logs: string
             profiles: string

@@ -16,7 +16,6 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { BaseSearchBox } from '@/components/base'
-import { DenoPushButton } from '@/components/proxy/deno-push-button'
 import { useVerge } from '@/hooks/use-verge'
 import delayManager from '@/services/delay'
 import { debugLog } from '@/utils/debug'
@@ -101,10 +100,6 @@ export const ProxyHead = ({
       >
         <NetworkCheckRounded />
       </IconButton>
-
-      {/* 自定义:一键把测过、延迟达标的美国节点推送到自建 Deno 订阅服务。
-          逻辑在 services/deno-push.ts,这里只是挂个入口。 */}
-      <DenoPushButton />
 
       <IconButton
         size="small"
