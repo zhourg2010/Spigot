@@ -124,15 +124,33 @@ const SUPPORTED = ['vless', 'anytls', 'trojan', 'vmess', 'ss'] as const
  */
 const PROTO_ORDER = ['vless', 'trojan', 'anytls', 'vmess', 'ss'] as const
 
+/**
+ * 上一次解析过的运行时配置。**缓存的是解析结果,不是配置内容本身。**
+ *
+ * 合并后的配置里除了节点还有规则、DNS、策略组,几百个节点的机场很容易到几百 KB。
+ * js-yaml 是同步的,解析期间界面完全卡住 —— 而"重新扫描"最常见的用途是取新的延迟数据,
+ * 配置本身根本没变,等于每次都为同一份文本重新卡一次。
+ *
+ * 拿整段文本当 key 而不是算 hash:字符串比较是 memcmp,几百 KB 走完也就零点几毫秒,
+ * 比任何 hash 都快,而且不存在碰撞的可能。
+ */
+let yamlCacheText: string | null = null
+let yamlCacheResult: ClashProxy[] = []
+
 export async function loadRuntimeProxies(): Promise<ClashProxy[]> {
   // 读的是内核当前真正加载的那份合并配置——比 profiles/ 下的原始订阅文件准确,
   // 节点名跟 API 报的是 1:1 对得上的,不会因为 profile 里配了改名脚本而错位。
   const text = await invoke<string>('get_runtime_yaml')
+  if (text === yamlCacheText) return yamlCacheResult
+
   const doc = yaml.load(text) as { proxies?: ClashProxy[] } | null
   const proxies = doc?.proxies ?? []
-  return proxies.filter(
+  const out = proxies.filter(
     (p) => p && typeof p.name === 'string' && SUPPORTED.includes(p.type as never),
   )
+  yamlCacheText = text
+  yamlCacheResult = out
+  return out
 }
 
 /** 从内核拿每个节点最近一次的实测延迟。0 / 缺失 = 当下不可用。 */
@@ -149,7 +167,93 @@ export async function loadDelays(): Promise<Map<string, number>> {
 
 // ---------------------------------------------------------------- 域名解析
 
+/**
+ * 域名 → IP 的缓存。**内存 + 落盘两层。**
+ *
+ * 落盘的理由:500 个节点的扫描里,DNS 是最慢的一步(并发 16,每个 DoH 往返
+ * 几十到几百毫秒,解析不了的要等满 8 秒超时)。而域名对应的 IP 几天都不会变 ——
+ * 每次开应用都从零重解析一遍,纯属白等。
+ *
+ * **只把成功的结果落盘,失败的(null)只留在内存里。** 这条很重要:
+ * 断网的时候 500 个域名会全部解析失败,如果把 null 也存下来,下一次(哪怕网络
+ * 已经好了)整张表的 IP 都是"解析不了",国家全是未知,自动勾选一个都选不上 ——
+ * 而且看不出是缓存的锅。宁可每次重试,也不能缓存一个错误的"不可达"。
+ */
 const dnsCache = new Map<string, string | null>()
+
+const DNS_CACHE_FILE = `${SETTINGS_DIR}/dns-cache.json`
+/**
+ * 成功的解析结果保留多久。
+ *
+ * **这是个取舍,不是白拿的:** 之前缓存只在内存里,重启应用就重新解析,永远是新的。
+ * 落盘之后,机场万一换了 IP,最多会有 24 小时按旧 IP 判国家 —— 后果是某个节点的
+ * cc 判错(可能漏推一个美国节点,或者推进去一个已经不在美国的)。延迟数据是每次
+ * 从内核实时拿的,不受影响,所以死节点照样会被延迟阈值挡掉。
+ *
+ * 定 24 小时是因为再短就没意义了:如果一天扫一次,TTL 设 12 小时的话每次都是
+ * 全新解析,缓存等于没有。
+ */
+const DNS_TTL_MS = 24 * 3600 * 1000
+/** 缓存条数上限,超了丢最旧的。长期用下来不至于攒成一个大文件。 */
+const DNS_CACHE_MAX = 2000
+
+interface DnsEntry {
+  ip: string
+  at: number
+}
+
+/** 每条的解析时间,用来算 TTL。内存 Map 里只放 ip,时间戳单独一份。 */
+const dnsLoadedAt = new Map<string, number>()
+let dnsDirty = false
+/** 用独立的标志位,不能拿 dnsLoadedAt.size 判断 —— 缓存文件不存在时它一直是 0,
+    那样每次扫描都会再去 stat 一遍文件。 */
+let dnsLoaded = false
+
+/** 启动后第一次扫描时调一次。读失败一律当成没有缓存 —— 这是纯优化,不能因它挡住扫描。 */
+export async function loadDnsCache(): Promise<void> {
+  if (dnsLoaded) return
+  dnsLoaded = true
+  try {
+    if (!(await exists(DNS_CACHE_FILE, { baseDir: BaseDirectory.AppData }))) return
+    const raw = await readTextFile(DNS_CACHE_FILE, { baseDir: BaseDirectory.AppData })
+    const obj = JSON.parse(raw) as Record<string, DnsEntry>
+    const now = Date.now()
+    for (const [host, e] of Object.entries(obj)) {
+      if (!e || typeof e.ip !== 'string' || typeof e.at !== 'number') continue
+      if (now - e.at > DNS_TTL_MS) continue
+      dnsCache.set(host, e.ip)
+      dnsLoadedAt.set(host, e.at)
+    }
+  } catch {
+    // 文件坏了/读不出来 —— 当成没缓存,下面照常解析
+  }
+}
+
+/** 扫描结束后调一次。**不要每解析一个就写一次** —— 那是 500 次磁盘写。 */
+export async function saveDnsCache(): Promise<void> {
+  if (!dnsDirty) return
+  dnsDirty = false
+  try {
+    const now = Date.now()
+    let entries: [string, DnsEntry][] = []
+    for (const [host, ip] of dnsCache) {
+      if (ip === null) continue // 失败的不落盘,理由见上面
+      // 用原始时间戳,不是 now —— 否则每存一次盘就把 TTL 续一次,条目永远不过期
+      entries.push([host, { ip, at: dnsLoadedAt.get(host) ?? now }])
+    }
+    // 超上限就丢最旧的
+    if (entries.length > DNS_CACHE_MAX) {
+      entries.sort((a, b) => b[1].at - a[1].at)
+      entries = entries.slice(0, DNS_CACHE_MAX)
+    }
+    await mkdir(SETTINGS_DIR, { baseDir: BaseDirectory.AppData, recursive: true })
+    await writeTextFile(DNS_CACHE_FILE, JSON.stringify(Object.fromEntries(entries)), {
+      baseDir: BaseDirectory.AppData,
+    })
+  } catch {
+    // 写不进去就算了,下次重新解析而已,不值得打扰用户
+  }
+}
 
 const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
@@ -184,6 +288,10 @@ export async function resolveHost(host: string): Promise<string | null> {
     ip = null
   }
   dnsCache.set(host, ip)
+  if (ip !== null) {
+    dnsLoadedAt.set(host, Date.now())
+    dnsDirty = true
+  }
   return ip
 }
 
@@ -678,6 +786,8 @@ export async function scanNodes(onProgress?: (msg: string) => void): Promise<Sca
 
   say(`解析 ${proxies.length} 个节点的服务器地址…`)
   const hosts = [...new Set(proxies.map((p) => String(p.server ?? '')).filter(Boolean))]
+  // 上次跑出来的结果能直接用的就不用再解析了(见 loadDnsCache 的说明)
+  await loadDnsCache()
   // 并发解析。串行的话一个解析不了的域名要等 8 秒超时,几百个节点能拖到分钟级。
   // 用并发池而不是切批次:批次里只要有一个域名解析不了,整批都得陪着等满超时。
   // 进度同样要节流:每解析完一个就回调一次的话,那头是 setState,500 次重渲。
@@ -687,6 +797,8 @@ export async function scanNodes(onProgress?: (msg: string) => void): Promise<Sca
   const ips = await mapPool(hosts, 16, (h) => resolveHost(h), (done) => dnsTick(done))
   const ipOf = new Map<string, string | null>()
   hosts.forEach((h, i) => ipOf.set(h, ips[i]))
+  // 解析完统一写一次盘。每解析一个写一次的话就是 500 次磁盘写。
+  await saveDnsCache()
 
   const rows: NodeRow[] = proxies.map((p) => {
     const server = String(p.server ?? '')
@@ -704,6 +816,30 @@ export async function scanNodes(onProgress?: (msg: string) => void): Promise<Sca
   })
 
   return { rows, geoReady, withDelay: rows.filter((r) => r.delay > 0).length }
+}
+
+/**
+ * 重新扫描时把上一轮测出来的可达性结果搬过来。
+ *
+ * 不搬的话,每次点「重新扫描」(最常见的用途只是取新的延迟数据)就把
+ * claude/gpt/gemini 三轮测试的结果清空 —— 500 个节点重测一轮要一分多钟,
+ * 而节点通不通并不会因为你刷新了一下延迟就变。
+ *
+ * **认的是 name + server + port 三者都一样**,不是只认名字。机场经常沿用节点名
+ * 但换掉后面的服务器,那种情况下旧的可达性结果是错的,宁可标成"没测过"(灰点)
+ * 让你重测,也不能显示一个绿点说它通。
+ */
+export function carryOverReach(prev: NodeRow[], next: NodeRow[]): NodeRow[] {
+  if (prev.length === 0) return next
+  const byId = new Map<string, NodeRow['reach']>()
+  for (const r of prev) {
+    if (r.reach) byId.set(`${r.name}\u0000${r.server}\u0000${r.port}`, r.reach)
+  }
+  if (byId.size === 0) return next
+  return next.map((r) => {
+    const reach = byId.get(`${r.name}\u0000${r.server}\u0000${r.port}`)
+    return reach ? { ...r, reach } : r
+  })
 }
 
 /**
