@@ -85,10 +85,24 @@ const SettingPage = () => {
           <Box
             sx={{
               borderRadius: 2,
+              marginBottom: 1.5,
               backgroundColor: isDark ? '#282a36' : '#ffffff',
             }}
           >
             <SettingClash onError={onError} />
+          </Box>
+          {/* Spigot 新增,放左栏最后。
+              原来在右栏,但右栏本来就长得多(按设置条目数:左 14 / 右 25),
+              放右边等于往长的那一边继续加。挪过来之后是 18 / 21,两栏基本齐平。
+              左栏"内核/系统"的归类因此不再严格 —— 但一个滚半天才到底的页面,
+              比归类不纯粹更影响用。 */}
+          <Box
+            sx={{
+              borderRadius: 2,
+              backgroundColor: isDark ? '#282a36' : '#ffffff',
+            }}
+          >
+            <SettingDenoPush onError={onError} />
           </Box>
         </Grid>
         <Grid size={6}>
@@ -104,21 +118,10 @@ const SettingPage = () => {
           <Box
             sx={{
               borderRadius: 2,
-              marginBottom: 1.5,
               backgroundColor: isDark ? '#282a36' : '#ffffff',
             }}
           >
             <SettingVergeAdvanced onError={onError} />
-          </Box>
-          {/* Spigot 新增。放右栏最后:左栏是内核/系统那些"改了会影响联网"的设置,
-              右栏是应用层的,Deno Push 属于后者。 */}
-          <Box
-            sx={{
-              borderRadius: 2,
-              backgroundColor: isDark ? '#282a36' : '#ffffff',
-            }}
-          >
-            <SettingDenoPush onError={onError} />
           </Box>
         </Grid>
       </Grid>
