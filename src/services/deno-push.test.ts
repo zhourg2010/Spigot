@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   type ClashProxy,
+  carryOverReach,
   countryOfIp,
   DEFAULT_SETTINGS,
   geoCodeAt,
@@ -440,5 +441,61 @@ describe('parseGeoDb 的边界', () => {
     const parsed = parseGeoDb('100,5,US\n5,10,CA\n')
     expect(parsed.len).toBe(1)
     expect(geoCodeAt(parsed, 0)).toBe('CA')
+  })
+})
+
+describe('carryOverReach', () => {
+  const row = (over: Partial<NodeRow> = {}): NodeRow => ({
+    name: 'US-01',
+    proto: 'vless',
+    server: 'a.example.com',
+    port: 443,
+    ip: '1.2.3.4',
+    cc: 'US',
+    delay: 100,
+    uri: 'vless://x@a.example.com:443',
+    ...over,
+  })
+
+  it('同一个节点的可达性结果搬过来,省掉一分多钟的重测', () => {
+    const prev = [row({ reach: { claude: 210, gpt: 0 } })]
+    const next = [row({ delay: 88 })] // 延迟变了,身份没变
+    const out = carryOverReach(prev, next)
+    expect(out[0].reach).toEqual({ claude: 210, gpt: 0 })
+    expect(out[0].delay).toBe(88) // 新数据不能被旧的盖掉
+  })
+
+  it('名字一样但服务器换了 → 不搬,标回没测过', () => {
+    // 机场沿用节点名换后端是常事,搬过来等于拿旧服务器的结果骗人
+    const prev = [row({ reach: { claude: 210 } })]
+    const next = [row({ server: 'b.example.com' })]
+    expect(carryOverReach(prev, next)[0].reach).toBeUndefined()
+  })
+
+  it('名字和服务器一样但端口换了 → 也不搬', () => {
+    const prev = [row({ reach: { claude: 210 } })]
+    const next = [row({ port: 8443 })]
+    expect(carryOverReach(prev, next)[0].reach).toBeUndefined()
+  })
+
+  it('上一轮没测过就原样返回,不做无谓的拷贝', () => {
+    const next = [row()]
+    expect(carryOverReach([row()], next)).toBe(next)
+    expect(carryOverReach([], next)).toBe(next)
+  })
+
+  it('新增的节点保持没测过', () => {
+    const prev = [row({ reach: { claude: 210 } })]
+    const next = [row(), row({ name: 'US-02', server: 'c.example.com' })]
+    const out = carryOverReach(prev, next)
+    expect(out[0].reach).toEqual({ claude: 210 })
+    expect(out[1].reach).toBeUndefined()
+  })
+
+  it('名字里带空格也不会跟别的行串上 —— key 用不可见字符拼就是为了这个', () => {
+    // 拿 '-' 之类的可见字符拼 key 的话,"a-b" + "c" 会跟 "a" + "b-c" 撞上
+    const prev = [row({ name: 'a', server: 'b', port: 1, reach: { claude: 1 } })]
+    const next = [row({ name: 'a b', server: '', port: 1 })]
+    expect(carryOverReach(prev, next)[0].reach).toBeUndefined()
   })
 })

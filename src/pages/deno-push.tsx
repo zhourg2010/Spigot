@@ -39,6 +39,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'rea
 import { BasePage } from '@/components/base'
 import NodeTable, { pushable } from '@/components/deno-push/node-table'
 import {
+  carryOverReach,
   DEFAULT_SETTINGS,
   type DenoPushSettings,
   getServiceState,
@@ -162,7 +163,7 @@ const DenoPushPage = () => {
     setReport(null)
     try {
       const res = await scanNodes(setProgress)
-      setRows(res.rows)
+      setRows(carryOverReach(rows, res.rows))
       setGeoReady(res.geoReady)
       setScanned(true)
       // 扫完默认按老的那套判据勾上(美国 + 延迟达标)—— 大多数时候这就是你要推的,
