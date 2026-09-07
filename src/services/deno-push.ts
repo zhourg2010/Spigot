@@ -187,6 +187,65 @@ export async function resolveHost(host: string): Promise<string | null> {
   return ip
 }
 
+// ---------------------------------------------------------------- 并发池
+
+/**
+ * 并发跑一批异步任务,**慢的不挡快的**。
+ *
+ * 原来这里是"固定大小批次 + Promise.all":切 8 个一批,整批等最慢的那个。
+ * 测可达性时超时是 5 秒,一批里只要有一个节点是死的,另外 7 个 0.3 秒测完也得
+ * 干等 5 秒。500 个节点、60 个不通的话,大约 3.5 分钟 —— 而这些等待纯属浪费。
+ *
+ * 改成 worker pool 之后总耗时 ≈ 所有任务耗时之和 / 并发数,同样这批数据约 65 秒。
+ *
+ * `fn` **不能抛异常** —— 一个任务炸了会带走整个 worker,后面的任务再没人领。
+ * 调用方自己 try/catch 成一个"失败"值。
+ */
+export async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+  onDone?: (done: number, total: number) => void,
+): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  let done = 0
+
+  const worker = async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i], i)
+      onDone?.(++done, items.length)
+    }
+  }
+
+  const n = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(Array.from({ length: n }, worker))
+  return out
+}
+
+/**
+ * 把进度回调按时间节流。进度回调那头是 React 的 setState ——
+ * 500 个节点一个一个回调就是 500 次重渲,比测试本身还费。
+ * 最后一次(done === total)一定放过去,否则进度条会停在 499/500。
+ */
+function throttleTicks(
+  total: number,
+  onTick?: (done: number, total: number) => void,
+  everyMs = 200,
+): (done: number) => void {
+  if (!onTick) return () => {}
+  let last = 0
+  return (done: number) => {
+    const now = Date.now()
+    if (done >= total || now - last >= everyMs) {
+      last = now
+      onTick(done, total)
+    }
+  }
+}
+
 // ---------------------------------------------------------------- GeoIP
 
 /**
@@ -202,10 +261,30 @@ const GEOIP_FILE = `${SETTINGS_DIR}/country-ipv4-num.csv`
 const GEOIP_MAX_AGE_MS = 7 * 24 * 3600 * 1000
 const GEOIP_MIN_BYTES = 100 * 1024 // 小得离谱说明下到的是错误页而不是库
 
-interface GeoDb {
-  starts: number[]
-  ends: number[]
-  codes: string[]
+/**
+ * GeoIP 库的常驻表示。**用 typed array,不用普通数组。**
+ *
+ * 这个库有 30 万条(线上文件 6.79 MB)。同规模合成数据实测(Node 24,
+ * heapUsed + arrayBuffers,前后都手动 GC):
+ *
+ *              number[]×2 + string[]      Uint32Array×2 + Uint16Array
+ *   常驻内存        16.6 MB                      3.0 MB
+ *   解析耗时         119 ms                       54 ms
+ *   二分查询          4 ms                         4 ms      (500 次 × 200 轮)
+ *
+ * 内存省下来的是 `number[]` 的装箱开销,和三十万个两字符字符串各自的对象头;
+ * 解析快是因为不再 `split('\n')` 造三十万个临时字符串。
+ *
+ * 查询速度**没变**,别指望这个 —— 二分只走十几步,连续内存的优势在这个规模上
+ * 量不出来。(一开始这里写的是"查询也会变快",实测是 4ms → 6ms,反而更慢:
+ * 每次查询都 fromCharCode 新建一个字符串。加了 CODE_CACHE 才拉回持平。)
+ */
+export interface GeoDb {
+  starts: Uint32Array
+  ends: Uint32Array
+  /** 两位国家码打包成一个 uint16:高字节是第一个字符,低字节是第二个 */
+  codes: Uint16Array
+  len: number
 }
 
 let geoDb: GeoDb | null = null
@@ -220,24 +299,73 @@ export function ipToInt(ip: string): number {
 }
 
 export function parseGeoDb(text: string): GeoDb {
-  const starts: number[] = []
-  const ends: number[] = []
-  const codes: string[] = []
-  for (const line of text.split('\n')) {
-    if (!line) continue
-    const a = line.indexOf(',')
-    if (a < 0) continue
-    const b = line.indexOf(',', a + 1)
-    if (b < 0) continue
-    const s = Number(line.slice(0, a))
-    const e = Number(line.slice(a + 1, b))
-    if (!Number.isFinite(s) || !Number.isFinite(e)) continue
-    starts.push(s)
-    ends.push(e)
-    codes.push(line.slice(b + 1, b + 3))
+  // 先数一遍换行,拿到行数上限,再**按准数**分配。
+  //
+  // 之前想用"估一个上限 + 最后 subarray 掉多余部分",那是错的:subarray 返回的是
+  // 同一块 buffer 上的视图,多分配的内存一个字节都不会还回去 —— 省内存的初衷直接落空。
+  // 数换行是一次 native memchr 扫描,6.8MB 大概十几毫秒,换来的是零浪费。
+  let cap = 1
+  for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) cap++
+
+  const starts = new Uint32Array(cap)
+  const ends = new Uint32Array(cap)
+  const codes = new Uint16Array(cap)
+  let n = 0
+
+  // 不用 text.split('\n'):那会一次性造出三十多万个字符串对象,峰值内存比库本身还大。
+  // 手动走行游标,只在真正要转数字的地方 slice。
+  const total = text.length
+  let pos = 0
+  while (pos < total) {
+    let eol = text.indexOf('\n', pos)
+    if (eol < 0) eol = total
+    // 逗号要限制在**本行之内**找 —— indexOf 会一路找到后面的行去
+    const a = text.indexOf(',', pos)
+    const b = a > pos && a < eol ? text.indexOf(',', a + 1) : -1
+    // 国家码占 b+1 和 b+2 两格,必须都还在这一行里
+    if (b > a && b + 2 < eol) {
+      const lo = Number(text.slice(pos, a))
+      const hi = Number(text.slice(a + 1, b))
+      // 越界的行直接丢。Uint32Array 会**静默**把超范围的值截断,坏数据混进来
+      // 只会让二分查找给出错得毫无道理的结果,还查不出原因。
+      if (
+        Number.isFinite(lo) &&
+        Number.isFinite(hi) &&
+        lo >= 0 &&
+        hi <= 0xffffffff &&
+        hi >= lo
+      ) {
+        starts[n] = lo
+        ends[n] = hi
+        codes[n] = (text.charCodeAt(b + 1) << 8) | text.charCodeAt(b + 2)
+        n++
+      }
+    }
+    pos = eol + 1
   }
-  return { starts, ends, codes }
+
+  // n 跟 cap 的差就是格式坏掉的行数,正常库里是 0 或个位数,不值得为它再拷一份。
+  return { starts, ends, codes, len: n }
 }
+
+/**
+ * 取第 i 条的两位国家码。打包格式(高字节第一个字符、低字节第二个)只在这里和
+ * parseGeoDb 里出现,别处不该知道 codes 是个 Uint16Array。
+ */
+export function geoCodeAt(db: GeoDb, i: number): string {
+  const packed = db.codes[i]
+  // 全世界就两百多个国家码,但查询次数是节点数级别的。不缓存的话每查一次
+  // fromCharCode 都新建一个字符串 —— 实测这一下就把 typed array 省下来的
+  // 那点查询开销又赔回去了(4ms → 6ms)。
+  let cc = CODE_CACHE.get(packed)
+  if (cc === undefined) {
+    cc = String.fromCharCode(packed >> 8, packed & 0xff)
+    CODE_CACHE.set(packed, cc)
+  }
+  return cc
+}
+
+const CODE_CACHE = new Map<number, string>()
 
 /**
  * 确保 GeoIP 库可用。超过 7 天就重新下载;下载失败但本地有旧的就继续用旧的——
@@ -281,7 +409,7 @@ export async function ensureGeoDb(): Promise<boolean> {
 
   try {
     geoDb = parseGeoDb(await readTextFile(GEOIP_FILE, opts))
-    return geoDb.starts.length > 0
+    return geoDb.len > 0
   } catch {
     return false
   }
@@ -296,9 +424,9 @@ export function countryOfIp(ip: string): string | null {
   const n = ipToInt(ip)
   if (n < 0) return null
 
-  const { starts, ends, codes } = geoDb
+  const { starts, ends, len } = geoDb
   let lo = 0
-  let hi = starts.length - 1
+  let hi = len - 1
   let hit = -1
   while (lo <= hi) {
     const mid = (lo + hi) >> 1
@@ -310,7 +438,8 @@ export function countryOfIp(ip: string): string | null {
     }
   }
   if (hit < 0) return null
-  return n <= ends[hit] ? codes[hit] : null
+  if (n > ends[hit]) return null
+  return geoCodeAt(geoDb, hit)
 }
 
 // ---------------------------------------------------------------- 分享链接
@@ -549,14 +678,15 @@ export async function scanNodes(onProgress?: (msg: string) => void): Promise<Sca
 
   say(`解析 ${proxies.length} 个节点的服务器地址…`)
   const hosts = [...new Set(proxies.map((p) => String(p.server ?? '')).filter(Boolean))]
+  // 并发解析。串行的话一个解析不了的域名要等 8 秒超时,几百个节点能拖到分钟级。
+  // 用并发池而不是切批次:批次里只要有一个域名解析不了,整批都得陪着等满超时。
+  // 进度同样要节流:每解析完一个就回调一次的话,那头是 setState,500 次重渲。
+  const dnsTick = throttleTicks(hosts.length, (done, total) =>
+    say(`解析服务器地址 ${done}/${total}…`),
+  )
+  const ips = await mapPool(hosts, 16, (h) => resolveHost(h), (done) => dnsTick(done))
   const ipOf = new Map<string, string | null>()
-  // 并发解析。串行的话一个解析不了的域名要等超时,几百个节点能拖到分钟级。
-  const CONCURRENCY = 16
-  for (let i = 0; i < hosts.length; i += CONCURRENCY) {
-    const batch = hosts.slice(i, i + CONCURRENCY)
-    const ips = await Promise.all(batch.map((h) => resolveHost(h)))
-    batch.forEach((h, k) => ipOf.set(h, ips[k]))
-  }
+  hosts.forEach((h, i) => ipOf.set(h, ips[i]))
 
   const rows: NodeRow[] = proxies.map((p) => {
     const server = String(p.server ?? '')
@@ -780,29 +910,26 @@ export async function testReach(
   if (!target) throw new Error(`不认识的测试目标: ${key}`)
 
   const out = rows.map((r) => ({ ...r, reach: { ...(r.reach ?? {}) } }))
-  const CONCURRENCY = 8
-  let done = 0
+  const tick = throttleTicks(out.length, onTick)
 
-  for (let i = 0; i < out.length; i += CONCURRENCY) {
-    const batch = out.slice(i, i + CONCURRENCY)
-    await Promise.all(
-      batch.map(async (r) => {
-        try {
-          const d = await delayProxyByName(r.name, target.url, timeout)
-          // 插件返回的形状各版本略有出入,取到数字就算数,取不到当 0(不通)
-          const ms = typeof d === 'number' ? d : Number((d as { delay?: number })?.delay ?? 0)
-          r.reach![key] = Number.isFinite(ms) && ms > 0 ? ms : 0
-        } catch {
-          // 超时/拒绝/内核报错一律当成不通。这里**不能**留 undefined ——
-          // undefined 的含义是"还没测过",跟"测了但不通"是两回事,
-          // 混起来的话过滤器会把没测过的当成通过。
-          r.reach![key] = 0
-        }
-      }),
-    )
-    done += batch.length
-    onTick?.(Math.min(done, out.length), out.length)
-  }
+  await mapPool(
+    out,
+    8,
+    async (r) => {
+      try {
+        const d = await delayProxyByName(r.name, target.url, timeout)
+        // 插件返回的形状各版本略有出入,取到数字就算数,取不到当 0(不通)
+        const ms = typeof d === 'number' ? d : Number((d as { delay?: number })?.delay ?? 0)
+        r.reach![key] = Number.isFinite(ms) && ms > 0 ? ms : 0
+      } catch {
+        // 超时/拒绝/内核报错一律当成不通。这里**不能**留 undefined ——
+        // undefined 的含义是"还没测过",跟"测了但不通"是两回事,
+        // 混起来的话过滤器会把没测过的当成通过。
+        r.reach![key] = 0
+      }
+    },
+    tick,
+  )
 
   return out
 }
