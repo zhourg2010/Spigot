@@ -63,6 +63,9 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
       - run: pnpm i
+      # 先查 Tauri 权限。ACL 是按命令授权的,少一条不会有编译错误,只会在用户点下去
+      # 的那一刻报 "not allowed by ACL" —— 这一条已经栽过两次。这步几百毫秒。
+      - run: pnpm check:caps
       - run: pnpm test
 
   build:
