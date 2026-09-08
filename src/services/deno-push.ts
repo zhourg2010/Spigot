@@ -13,7 +13,14 @@
  *      - 域名解析      → DoH(Cloudflare 的 dns-json),见 resolveHost()
  *      - GeoIP         → 下载 sapics 的 CSV 缓存到 $APPDATA,本地二分查
  *      - POST 到 Deno  → @tauri-apps/plugin-http 的 fetch(不受 CORS 限制)
- *    权限方面 capabilities 里已有 http(允许任意 https/http URL)和 fs($APPDATA 可写),不用改。
+ *    权限方面 capabilities/migrated.json 里已有的 fs 权限**只有三个**:
+ *    `fs:allow-read-file` / `fs:allow-exists` / `fs:allow-write-file`(scope 含 $APPDATA/**)。
+ *    **没有 `fs:allow-mkdir`** —— 所以本文件所有落盘的东西都直接写在 $APPDATA 根下,
+ *    不建子目录。文件名统一加 `deno-push-` 前缀当命名空间。
+ *    (这里原来写的是"fs 可写,不用改",然后在三处调了 mkdir,运行时全部
+ *     `plugin fs|mkdir not allowed by ACL` —— 设置存不进去、扫描也挂。
+ *     "能写文件"和"能建目录"在 Tauri 的 ACL 里是两个独立的权限。)
+ *    http 权限允许任意 https/http URL,那个是够的。
  *
  * 3. **设置不进 IVergeConfig。** 那个结构体在 Rust 侧是强类型的,加字段就得改 Rust,
  *    还会跟上游冲突。改成自己的 JSON 文件放 $APPDATA。
@@ -27,7 +34,6 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   BaseDirectory,
   exists,
-  mkdir,
   readTextFile,
   writeTextFile,
 } from '@tauri-apps/plugin-fs'
@@ -63,8 +69,12 @@ export const DEFAULT_SETTINGS: DenoPushSettings = {
   geoipStrict: true,
 }
 
-const SETTINGS_DIR = 'deno-push'
-const SETTINGS_FILE = `${SETTINGS_DIR}/settings.json`
+/**
+ * 落盘的文件全部直接放 $APPDATA 根下,**不建子目录**(见文件头:没有 mkdir 权限)。
+ * 统一的前缀就是命名空间,跟上游自己的 verge.yaml / profiles 等区分得开。
+ */
+const FILE_PREFIX = 'deno-push-'
+const SETTINGS_FILE = `${FILE_PREFIX}settings.json`
 
 export async function loadSettings(): Promise<DenoPushSettings> {
   try {
@@ -82,10 +92,6 @@ export async function loadSettings(): Promise<DenoPushSettings> {
 }
 
 export async function saveSettings(s: DenoPushSettings): Promise<void> {
-  await mkdir(SETTINGS_DIR, {
-    baseDir: BaseDirectory.AppData,
-    recursive: true,
-  })
   await writeTextFile(SETTINGS_FILE, JSON.stringify(s, null, 2), {
     baseDir: BaseDirectory.AppData,
   })
@@ -181,7 +187,7 @@ export async function loadDelays(): Promise<Map<string, number>> {
  */
 const dnsCache = new Map<string, string | null>()
 
-const DNS_CACHE_FILE = `${SETTINGS_DIR}/dns-cache.json`
+const DNS_CACHE_FILE = `${FILE_PREFIX}dns-cache.json`
 /**
  * 成功的解析结果保留多久。
  *
@@ -246,7 +252,6 @@ export async function saveDnsCache(): Promise<void> {
       entries.sort((a, b) => b[1].at - a[1].at)
       entries = entries.slice(0, DNS_CACHE_MAX)
     }
-    await mkdir(SETTINGS_DIR, { baseDir: BaseDirectory.AppData, recursive: true })
     await writeTextFile(DNS_CACHE_FILE, JSON.stringify(Object.fromEntries(entries)), {
       baseDir: BaseDirectory.AppData,
     })
@@ -365,7 +370,18 @@ function throttleTicks(
  */
 const GEOIP_URL =
   'https://github.com/sapics/ip-location-db/releases/download/latest/server-country-ipv4-num.csv'
-const GEOIP_FILE = `${SETTINGS_DIR}/country-ipv4-num.csv`
+const GEOIP_FILE = `${FILE_PREFIX}country-ipv4-num.csv`
+const GEOIP_META_FILE = `${FILE_PREFIX}geoip-updated.txt`
+
+/**
+ * 所有会落盘的文件名。导出是给测试用的 —— 钉住"每一个都直接在 $APPDATA 根下、
+ * 不带目录分隔符"。
+ *
+ * 为什么值得为这个写测试:少了 `fs:allow-mkdir` 是**运行时**才会炸的 ACL 错误,
+ * 类型检查和单元测试都看不见,只有真装上打开才知道。而"往路径里加一层目录"是个
+ * 看起来完全无害的改动。这条断言把它挡在 CI 里。
+ */
+export const STORAGE_FILES = [SETTINGS_FILE, DNS_CACHE_FILE, GEOIP_FILE, GEOIP_META_FILE]
 const GEOIP_MAX_AGE_MS = 7 * 24 * 3600 * 1000
 const GEOIP_MIN_BYTES = 100 * 1024 // 小得离谱说明下到的是错误页而不是库
 
@@ -482,15 +498,25 @@ const CODE_CACHE = new Map<number, string>()
  */
 export async function ensureGeoDb(): Promise<boolean> {
   if (geoDb) return true
+  // 整个函数**绝不往外抛**。它的契约就是"用不了就返回 false,调用方自己降级",
+  // 但原来 exists() / mkdir() 这些是裸调的 —— mkdir 撞上 ACL 那次,异常一路穿到
+  // scanNodes,整个"扫描节点"直接失败,而 GeoIP 明明只是个验证增强。
+  // 一个可选依赖不该有能力把主流程带走。
+  try {
+    return await loadGeoDb()
+  } catch {
+    return false
+  }
+}
 
-  await mkdir(SETTINGS_DIR, { baseDir: BaseDirectory.AppData, recursive: true })
+async function loadGeoDb(): Promise<boolean> {
   const opts = { baseDir: BaseDirectory.AppData } as const
   const has = await exists(GEOIP_FILE, opts)
 
   let stale = true
   if (has) {
     try {
-      const meta = await readTextFile(`${SETTINGS_DIR}/geoip-updated.txt`, opts)
+      const meta = await readTextFile(GEOIP_META_FILE, opts)
       stale = Date.now() - Number(meta) > GEOIP_MAX_AGE_MS
     } catch {
       stale = true
@@ -506,7 +532,7 @@ export async function ensureGeoDb(): Promise<boolean> {
         throw new Error(`文件小得离谱(${text.length} 字节),多半下到的是错误页`)
       }
       await writeTextFile(GEOIP_FILE, text, opts)
-      await writeTextFile(`${SETTINGS_DIR}/geoip-updated.txt`, String(Date.now()), opts)
+      await writeTextFile(GEOIP_META_FILE, String(Date.now()), opts)
       geoDb = parseGeoDb(text)
       return true
     } catch {

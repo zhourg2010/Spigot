@@ -15,6 +15,7 @@ import {
   parseGeoDb,
   pickForPush,
   roundRobin,
+  STORAGE_FILES,
   switchUrlOf,
   toShareUri,
   utf8ToBase64,
@@ -497,5 +498,28 @@ describe('carryOverReach', () => {
     const prev = [row({ name: 'a', server: 'b', port: 1, reach: { claude: 1 } })]
     const next = [row({ name: 'a b', server: '', port: 1 })]
     expect(carryOverReach(prev, next)[0].reach).toBeUndefined()
+  })
+})
+
+describe('落盘路径', () => {
+  it('全部直接在 $APPDATA 根下,不带目录分隔符', () => {
+    // capabilities/migrated.json 里没有 fs:allow-mkdir,建目录会在运行时报
+    // "plugin fs|mkdir not allowed by ACL" —— 设置存不进去、扫描也挂。
+    // 这类错误类型检查看不见,只有真装上打开才知道,所以在这儿钉一道。
+    expect(STORAGE_FILES.length).toBeGreaterThan(0)
+    for (const f of STORAGE_FILES) {
+      expect(f).not.toContain('/')
+      expect(f).not.toContain('\\')
+    }
+  })
+
+  it('都带统一前缀,不会跟上游自己的文件撞名', () => {
+    for (const f of STORAGE_FILES) {
+      expect(f.startsWith('deno-push-')).toBe(true)
+    }
+  })
+
+  it('文件名互不重复', () => {
+    expect(new Set(STORAGE_FILES).size).toBe(STORAGE_FILES.length)
   })
 })
