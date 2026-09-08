@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
       tag:
-        description: '版本号(如 v2.5.4-r1)。留空则发成 dev-<运行号> 的预发布'
+        description: '版本号(如 v1.0.0)。留空则发成 dev-<运行号> 的预发布'
         type: string
         default: ''
 
@@ -199,7 +199,7 @@ jobs:
           # 各平台实际产出什么,由 tauri.<平台>.conf.json 的 bundle.targets 决定:
           #   macOS   ['app','dmg']  → .dmg(.app 是目录,glob 不到,它在 dmg 里)
           #   Linux   ['deb','rpm']  → .deb 和 .rpm
-          #   Windows ['nsis']       → 形如 Spigot_2.5.4_x64-setup.exe
+          #   Windows ['nsis']       → 形如 Spigot_1.0.0_x64-setup.exe
           # 另外 Windows 还有上一步打的便携版 zip,它不在 bundle 目录里,而是被
           # portable.mjs 写在仓库根目录,所以单列一行、路径不带前缀。
           # 别写 .AppImage —— 配置里根本没开,那一行永远匹配不到,而真正会产出的 .rpm
