@@ -15,6 +15,23 @@
 
 许可证跟上游一致:**GNU GPL-3.0-only**,见 [LICENSE](./LICENSE)。
 
+## 发一个新版本
+
+**版本号由 tag 决定,不用手改任何文件。** 在 Actions 里跑「构建 Spigot」,
+勾上 `release`,`tag` 填 `v1.0.1`(下一个版本号)。构建时 CI 会把这个值写进
+`package.json` / `Cargo.toml` / `tauri.conf.json`,于是:
+
+    tag v1.0.1  →  Spigot_1.0.1_x64_portable.zip  →  应用里显示 1.0.1
+
+三者不可能对不上。仓库里 `package.json` 那个版本号只是开发时的默认值。
+
+这么做的理由:版本号写在三个文件里,而 zip 文件名是从 `package.json` 拼的。
+靠人记得发版前手动改三处,忘一次就是两个同名的包 —— `v2.5.4-r1` 和 `v2.5.4-r2`
+就是这么撞的,文件名和应用内版本一模一样,只有 git tag 不同,而 **tag 不在文件里**。
+
+填了一个已经发过的版本号,`release` 那一步会红着停下(否则 action-gh-release 会把
+新包**追加**到已有的 Release 上,两个不同构建混在一起)。
+
 ## 下载
 
 打 `v*` 的 tag 会自动构建并发 Release（macOS Apple 芯片 / macOS Intel / Windows / Linux）。

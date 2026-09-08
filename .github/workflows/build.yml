@@ -164,6 +164,22 @@ jobs:
       - name: 装依赖
         run: pnpm i
 
+      # 版本号**由 tag 决定**,不是由仓库里 package.json 那个值决定。
+      #
+      # 为什么:package.json / Cargo.toml / tauri.conf.json 三处都写着版本号,
+      # 而 zip 文件名是从 package.json 拼出来的。靠人记得发版前手动改三处的话,
+      # 忘一次就是两个同名的包 —— v2.5.4-r1 和 v2.5.4-r2 就是这么撞的:
+      # 文件名一模一样、应用里显示的版本一模一样,只有 git tag 不同,而 tag 不在文件里。
+      #
+      # 现在 tag 是唯一的事实来源:dispatch 时填 v1.0.1,出来的就是
+      # Spigot_1.0.1_x64_portable.zip、应用里显示 1.0.1、Release 叫 v1.0.1,三者
+      # 不可能对不上。仓库里 package.json 的值只是开发时的默认值。
+      #
+      # release-version.mjs 是上游自带的(它就是干这个的),之前只是没人调。
+      - name: 用 tag 定版本号
+        if: github.ref_type == 'tag' || inputs.tag != ''
+        run: pnpm release-version ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+
       # prebuild 按目标平台下载 mihomo 内核(sidecar)。不跑这步的话
       # tauri 打包时会因为找不到 externalBin 里声明的 verge-mihomo 而失败。
       - name: 下载内核 sidecar
@@ -227,6 +243,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 拦住"版本号重复"。action-gh-release 撞上已存在的 tag 不会报错,而是往那个
+      # 已有的 Release 上**追加**资产 —— 结果是一个 Release 里挂着两个不同构建的包,
+      # 而且旧的那个还在。将来自己都分不清下的是哪个。
+      #
+      # 放在 release job 开头而不是更早:再往前就得单开一个 job 让 build 依赖它,
+      # 为一个不常犯的错误加一道串行依赖不值。这里失败的代价只是"包没发出去,
+      # 但产物还在这次运行的 Artifacts 里",捡得回来。
+      - name: 检查这个版本号是不是已经发过
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "没有 tag(开发构建),跳过检查"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG")
+          if [ "$code" = "200" ]; then
+            echo "::error::$TAG 这个 Release 已经存在了。"
+            echo "::error::继续下去会把新包追加到那个已有的 Release 上,两个不同构建混在一起。"
+            echo "::error::换一个版本号重跑,或者先把旧的 Release 和 tag 删掉。"
+            exit 1
+          fi
+          echo "$TAG 没发过(HTTP $code),继续"
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
