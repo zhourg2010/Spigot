@@ -502,24 +502,14 @@ describe('carryOverReach', () => {
 })
 
 describe('落盘路径', () => {
-  it('全部直接在 $APPDATA 根下,不带目录分隔符', () => {
-    // capabilities/migrated.json 里没有 fs:allow-mkdir,建目录会在运行时报
-    // "plugin fs|mkdir not allowed by ACL" —— 设置存不进去、扫描也挂。
-    // 这类错误类型检查看不见,只有真装上打开才知道,所以在这儿钉一道。
+  it('都在同一个目录下,不往外散', () => {
+    // 权限那一侧由 scripts/check-capabilities.mjs 在 CI 里查 —— 那个检查要读
+    // src-tauri 下的 JSON,而 tsconfig 的 types 是白名单(不含 @types/node),
+    // 在 vitest 里 import node:fs 会让 tsc --noEmit 挂。
     expect(STORAGE_FILES.length).toBeGreaterThan(0)
     for (const f of STORAGE_FILES) {
-      expect(f).not.toContain('/')
-      expect(f).not.toContain('\\')
+      expect(f.startsWith('spigot/')).toBe(true)
     }
-  })
-
-  it('都带统一前缀,不会跟上游自己的文件撞名', () => {
-    for (const f of STORAGE_FILES) {
-      expect(f.startsWith('deno-push-')).toBe(true)
-    }
-  })
-
-  it('文件名互不重复', () => {
     expect(new Set(STORAGE_FILES).size).toBe(STORAGE_FILES.length)
   })
 })
