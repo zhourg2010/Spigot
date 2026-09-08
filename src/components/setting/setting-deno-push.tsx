@@ -140,7 +140,7 @@ const SettingDenoPush = ({ onError }: Props) => {
 
       <Box sx={{ px: 2, pb: 1.5 }}>
         <Typography variant="caption" color="text.secondary">
-          密钥存在应用数据目录的 <code>deno-push/settings.json</code>,不进仓库。
+          密钥存在应用数据目录的 <code>deno-push-settings.json</code>,不进仓库。
           {switchUrl && <> 服务开关走 <code>{switchUrl}</code>,同一把密钥。</>}
         </Typography>
       </Box>

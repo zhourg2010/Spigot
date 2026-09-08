@@ -426,3 +426,42 @@ claude/gpt/gemini 三轮的结果清空,而重测一轮 500 个节点要一分�
 (考虑过做成可拖拽的 —— 仓库里本来就有 @dnd-kit,上游在 profile / 规则编辑器等处
 用了。没做:跨两栏的拖拽要处理列间移动和落点判定,顺序还得持久化,而 IVergeConfig
 在 Rust 侧是强类型的、加字段就要动 Rust。对一个几个月开一次的页面不划算。)
+
+### 修复:`plugin fs|mkdir not allowed by ACL`(设置存不进去、扫描也挂)
+
+`capabilities/migrated.json` 里的 fs 权限**只有三个**:`fs:allow-read-file` /
+`fs:allow-exists` / `fs:allow-write-file`(scope 含 `$APPDATA/**`)。**没有
+`fs:allow-mkdir`。**
+
+而这份代码为了整洁,把落盘的东西放在 `$APPDATA/deno-push/` 子目录下,三处调了 `mkdir`:
+
+| 调用点 | 有没有被 try 包住 | 后果 |
+|---|---|---|
+| `saveSettings` | 否 | 设置根本存不进去 |
+| `ensureGeoDb` | 否 | 异常一路穿到 `scanNodes` → **「扫描节点」直接失败** |
+| `saveDnsCache` | 是 | 只是缓存写不了 |
+
+文件头当时写的是"权限方面 capabilities 里已有 fs($APPDATA 可写),不用改" ——
+那句是错的。**在 Tauri 的 ACL 里"能写文件"和"能建目录"是两个独立的权限。**
+
+**改法:不建目录。** 落盘的东西全部直接写在 `$APPDATA` 根下,文件名统一加
+`deno-push-` 前缀当命名空间:
+
+    deno-push-settings.json
+    deno-push-dns-cache.json
+    deno-push-country-ipv4-num.csv
+    deno-push-geoip-updated.txt
+
+Rust 侧启动时 `init_config()` → `ensure_directories()` 已经把 `app_home` 建好了,
+所以直接往里写文件是稳的。选这条而不是加 `fs:allow-mkdir`,是因为它**不需要新权限、
+不用动上游的 capabilities 文件、还少一整类失败模式** —— 跟本文件"尽量不改上游"的
+原则一致。
+
+顺带两处:
+
+- **`ensureGeoDb` 现在绝不往外抛。** 它的契约本来就是"用不了返回 false,调用方降级",
+  但原来 `exists()` 这些是裸调的。一个可选依赖不该有能力把主流程带走 ——
+  GeoIP 挂了就是国家显示"未知",不该变成"扫描失败"。
+- **加了三条测试**钉住"落盘路径不含目录分隔符"。少权限是**运行时**才炸的 ACL 错误,
+  类型检查和单元测试都看不见,只有真装上打开才知道;而"往路径里加一层目录"看起来
+  是个完全无害的改动。这道断言把它挡在 CI 里。
