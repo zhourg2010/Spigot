@@ -427,35 +427,43 @@ claude/gpt/gemini 三轮的结果清空,而重测一轮 500 个节点要一分�
 用了。没做:跨两栏的拖拽要处理列间移动和落点判定,顺序还得持久化,而 IVergeConfig
 在 Rust 侧是强类型的、加字段就要动 Rust。对一个几个月开一次的页面不划算。)
 
-### 修复:`plugin fs|mkdir not allowed by ACL`(设置存不进去、扫描也挂)
+### Tauri 权限:补齐 fs 的三条,新增内容收进 `$APPDATA/spigot/`
 
-`capabilities/migrated.json` 里的 fs 权限**只有三个**:`fs:allow-read-file` /
-`fs:allow-exists` / `fs:allow-write-file`(scope 含 `$APPDATA/**`)。**没有
-`fs:allow-mkdir`。**
+**Tauri 的 ACL 是按命令授权的,名字像不代表通用。** 上游 capabilities 里的 fs 权限
+只有三条:`fs:allow-read-file` / `fs:allow-write-file` / `fs:allow-exists`。而:
 
-而这份代码为了整洁,把落盘的东西放在 `$APPDATA/deno-push/` 子目录下,三处调了 `mkdir`:
+| JS 里写的 | 实际调用的命令 | 需要的权限 | 上游有吗 |
+|---|---|---|---|
+| `readFile()` | `read_file` | `fs:allow-read-file` | ✅ |
+| `writeFile()` | `write_file` | `fs:allow-write-file` | ✅ |
+| `exists()` | `exists` | `fs:allow-exists` | ✅ |
+| `readTextFile()` | `read_text_file` | `fs:allow-read-text-file` | ❌ |
+| `writeTextFile()` | `write_text_file` | `fs:allow-write-text-file` | ❌ |
+| `mkdir()` | `mkdir` | `fs:allow-mkdir` | ❌ |
 
-| 调用点 | 有没有被 try 包住 | 后果 |
-|---|---|---|
-| `saveSettings` | 否 | 设置根本存不进去 |
-| `ensureGeoDb` | 否 | 异常一路穿到 `scanNodes` → **「扫描节点」直接失败** |
-| `saveDnsCache` | 是 | 只是缓存写不了 |
+少一条的后果是运行时 `plugin fs|<命令> not allowed by ACL`,而 **`tsc` 和 vitest 都
+看不见** —— 只有真装上、点下去才知道。这一条连着栽了两次:先是 `mkdir`(设置存不进去、
+「扫描节点」也跟着挂),改掉之后又是 `writeTextFile`。
 
-文件头当时写的是"权限方面 capabilities 里已有 fs($APPDATA 可写),不用改" ——
-那句是错的。**在 Tauri 的 ACL 里"能写文件"和"能建目录"是两个独立的权限。**
+**改法:把缺的三条加进 `capabilities/migrated.json`,新增的落盘内容收进
+`$APPDATA/spigot/` 一个目录。**
 
-**改法:不建目录。** 落盘的东西全部直接写在 `$APPDATA` 根下,文件名统一加
-`deno-push-` 前缀当命名空间:
+中间试过"绕开权限"的路子 —— 不建目录、文件散在 `$APPDATA` 根下、文本走
+`readFile`/`writeFile` 加手工编解码。那条路是错的:**那份 capability 的 `fs:scope` 是
+`["$APPDATA/**", "$RESOURCE/../**", "**"]`**,这个应用本来就能读写磁盘上任意文件。
+在这个前提下再拒绝 `write_text_file`,只是同样的字节、同样的路径、换个命令名不让走 ——
+一点安全性都没多,却要付出四个散文件混在上游文件堆里、外加一层二进制包装的代价。
 
-    deno-push-settings.json
-    deno-push-dns-cache.json
-    deno-push-country-ipv4-num.csv
-    deno-push-geoip-updated.txt
+**新增的检查:`scripts/check-capabilities.mjs`**,CI 的 test job 里跑(`pnpm check:caps`,
+几百毫秒)。它列出本仓库用到的每一条权限和"谁在用",扫整个 capabilities 目录,缺了就红。
 
-Rust 侧启动时 `init_config()` → `ensure_directories()` 已经把 `app_home` 建好了,
-所以直接往里写文件是稳的。选这条而不是加 `fs:allow-mkdir`,是因为它**不需要新权限、
-不用动上游的 capabilities 文件、还少一整类失败模式** —— 跟本文件"尽量不改上游"的
-原则一致。
+挡两种情况:一是以后加了新的 fs / 插件调用忘了配权限;二是**同步上游时
+`migrated.json` 被覆盖**,我们加的几条没了 —— 那样 CI 会红,而不是等包发出去、
+装上才发现。反向验过:临时删掉 `fs:allow-write-text-file`,它退出码 1 并指出是谁在用。
+
+顺带保留的一处:**`ensureGeoDb` 绝不往外抛。** 它的契约本来就是"用不了返回 false,
+调用方降级",但原来 `exists()` 这些是裸调的 —— 这正是让 mkdir 那次的影响从"存不了设置"
+扩大到"连扫描都挂"的原因。一个可选依赖不该有能力把主流程带走。
 
 顺带两处:
 

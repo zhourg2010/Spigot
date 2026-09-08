@@ -13,13 +13,24 @@
  *      - 域名解析      → DoH(Cloudflare 的 dns-json),见 resolveHost()
  *      - GeoIP         → 下载 sapics 的 CSV 缓存到 $APPDATA,本地二分查
  *      - POST 到 Deno  → @tauri-apps/plugin-http 的 fetch(不受 CORS 限制)
- *    权限方面 capabilities/migrated.json 里已有的 fs 权限**只有三个**:
- *    `fs:allow-read-file` / `fs:allow-exists` / `fs:allow-write-file`(scope 含 $APPDATA/**)。
- *    **没有 `fs:allow-mkdir`** —— 所以本文件所有落盘的东西都直接写在 $APPDATA 根下,
- *    不建子目录。文件名统一加 `deno-push-` 前缀当命名空间。
- *    (这里原来写的是"fs 可写,不用改",然后在三处调了 mkdir,运行时全部
- *     `plugin fs|mkdir not allowed by ACL` —— 设置存不进去、扫描也挂。
- *     "能写文件"和"能建目录"在 Tauri 的 ACL 里是两个独立的权限。)
+ *    **落盘的东西全部放 `$APPDATA/spigot/` 这一个目录**,不要往外散。
+ *
+ *    Tauri 的 ACL 是**按命令**授权的,名字像不代表通用:`writeTextFile()` 走的是
+ *    `write_text_file` 命令,归 `fs:allow-write-text-file` 管,跟 `fs:allow-write-file`
+ *    (管 `write_file`)是两条**不同**的权限。用了没授权的命令,运行时报
+ *    `plugin fs|<命令> not allowed by ACL`,而**类型检查和单元测试都看不见**。
+ *
+ *    本仓库在 capabilities/migrated.json 里额外加了三条(上游只有 read-file /
+ *    write-file / exists):`fs:allow-mkdir`、`fs:allow-read-text-file`、
+ *    `fs:allow-write-text-file`。
+ *
+ *    以后要用别的 fs 命令(remove / rename / readDir …),**记得去那个文件里加对应的
+ *    `allow-*`** —— 否则又是一次只有装上才发现的运行时错误。这一条已经栽过两次。
+ *
+ *    (为什么是"加权限"而不是"绕开":那份 capability 的 fs:scope 是 `**`,这个应用
+ *     本来就能读写磁盘上任意文件。再拒绝 write_text_file 只是同样的字节、同样的路径、
+ *     换个命令名不让走 —— 一点安全性都没多,却要付出散文件和二进制包装的代价。)
+ *
  *    http 权限允许任意 https/http URL,那个是够的。
  *
  * 3. **设置不进 IVergeConfig。** 那个结构体在 Rust 侧是强类型的,加字段就得改 Rust,
@@ -34,6 +45,7 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   BaseDirectory,
   exists,
+  mkdir,
   readTextFile,
   writeTextFile,
 } from '@tauri-apps/plugin-fs'
@@ -70,11 +82,18 @@ export const DEFAULT_SETTINGS: DenoPushSettings = {
 }
 
 /**
- * 落盘的文件全部直接放 $APPDATA 根下,**不建子目录**(见文件头:没有 mkdir 权限)。
- * 统一的前缀就是命名空间,跟上游自己的 verge.yaml / profiles 等区分得开。
+ * 本应用新增的东西**全部落在这一个目录下**,跟上游自己的 verge.yaml / profiles/ 分开。
+ * 想整体备份或者清空,拷走 / 删掉这一个目录就够了。
  */
-const FILE_PREFIX = 'deno-push-'
-const SETTINGS_FILE = `${FILE_PREFIX}settings.json`
+const DATA_DIR = 'spigot'
+const SETTINGS_FILE = `${DATA_DIR}/settings.json`
+
+const APPDATA = { baseDir: BaseDirectory.AppData } as const
+
+/** 确保数据目录在。写之前调一下;recursive 让重复调用是无操作。 */
+async function ensureDataDir(): Promise<void> {
+  await mkdir(DATA_DIR, { ...APPDATA, recursive: true })
+}
 
 export async function loadSettings(): Promise<DenoPushSettings> {
   try {
@@ -92,6 +111,7 @@ export async function loadSettings(): Promise<DenoPushSettings> {
 }
 
 export async function saveSettings(s: DenoPushSettings): Promise<void> {
+  await ensureDataDir()
   await writeTextFile(SETTINGS_FILE, JSON.stringify(s, null, 2), {
     baseDir: BaseDirectory.AppData,
   })
@@ -187,7 +207,7 @@ export async function loadDelays(): Promise<Map<string, number>> {
  */
 const dnsCache = new Map<string, string | null>()
 
-const DNS_CACHE_FILE = `${FILE_PREFIX}dns-cache.json`
+const DNS_CACHE_FILE = `${DATA_DIR}/dns-cache.json`
 /**
  * 成功的解析结果保留多久。
  *
@@ -252,6 +272,7 @@ export async function saveDnsCache(): Promise<void> {
       entries.sort((a, b) => b[1].at - a[1].at)
       entries = entries.slice(0, DNS_CACHE_MAX)
     }
+    await ensureDataDir()
     await writeTextFile(DNS_CACHE_FILE, JSON.stringify(Object.fromEntries(entries)), {
       baseDir: BaseDirectory.AppData,
     })
@@ -370,17 +391,10 @@ function throttleTicks(
  */
 const GEOIP_URL =
   'https://github.com/sapics/ip-location-db/releases/download/latest/server-country-ipv4-num.csv'
-const GEOIP_FILE = `${FILE_PREFIX}country-ipv4-num.csv`
-const GEOIP_META_FILE = `${FILE_PREFIX}geoip-updated.txt`
+const GEOIP_FILE = `${DATA_DIR}/country-ipv4-num.csv`
+const GEOIP_META_FILE = `${DATA_DIR}/geoip-updated.txt`
 
-/**
- * 所有会落盘的文件名。导出是给测试用的 —— 钉住"每一个都直接在 $APPDATA 根下、
- * 不带目录分隔符"。
- *
- * 为什么值得为这个写测试:少了 `fs:allow-mkdir` 是**运行时**才会炸的 ACL 错误,
- * 类型检查和单元测试都看不见,只有真装上打开才知道。而"往路径里加一层目录"是个
- * 看起来完全无害的改动。这条断言把它挡在 CI 里。
- */
+/** 所有会落盘的文件。导出给测试钉住"都在 DATA_DIR 这一个目录下,不往外散"。 */
 export const STORAGE_FILES = [SETTINGS_FILE, DNS_CACHE_FILE, GEOIP_FILE, GEOIP_META_FILE]
 const GEOIP_MAX_AGE_MS = 7 * 24 * 3600 * 1000
 const GEOIP_MIN_BYTES = 100 * 1024 // 小得离谱说明下到的是错误页而不是库
@@ -531,6 +545,7 @@ async function loadGeoDb(): Promise<boolean> {
       if (text.length < GEOIP_MIN_BYTES) {
         throw new Error(`文件小得离谱(${text.length} 字节),多半下到的是错误页`)
       }
+      await ensureDataDir()
       await writeTextFile(GEOIP_FILE, text, opts)
       await writeTextFile(GEOIP_META_FILE, String(Date.now()), opts)
       geoDb = parseGeoDb(text)
