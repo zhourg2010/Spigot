@@ -494,3 +494,61 @@ tag 根本没进去。下载目录里放两个就认不出哪个是哪个,装完
 考虑过但否决的写法:**`2.5.4-r2` 这种带后缀的**。在 semver 里 `-` 引出的是 prerelease,
 `2.5.4-r2` 排序上**小于** `2.5.4` —— 我们的新构建会显得比上游基线还老。真要恢复
 自动更新的话,更新器会把它当降级。
+
+### 版本号由 tag 驱动,不再靠人记得改
+
+上一节把版本号改成了 Spigot 自己的 `1.0.0`,但**没解决机制** —— 下次发版还是要
+手动改三个文件(`package.json` / `Cargo.toml` / `tauri.conf.json`),忘一次就又是
+两个同名的包。
+
+现在 `build.yml` 在构建前加一步:
+
+    - name: 用 tag 定版本号
+      if: github.ref_type == 'tag' || inputs.tag != ''
+      run: pnpm release-version <tag>
+
+`release-version.mjs` 是**上游自带的**,它就是干这个的(自动去掉 `v` 前缀、写三处),
+之前只是没有任何东西调它。
+
+于是 tag 成了唯一的事实来源:`v1.0.1` → `Spigot_1.0.1_x64_portable.zip` → 应用里
+显示 1.0.1。仓库里 `package.json` 的值降级成开发时的默认值。
+
+**但这还剩最后一点人工:版本号仍然要人自己想。** 所以 `tag` 的默认值改成了 `auto` ——
+`scripts/next-version.mjs` 查最近一个**正式** Release(`/releases/latest` 本来就跳过
+prerelease,dev 构建不会把版本号顶上去),补丁号 +1。要跨小版本/大版本才手填。
+
+版本号由**独立的 `version` job 算一次**,`build` 和 `release` 都用它的输出。两边各算
+一次的话,万一中间有人发了个 Release,两边会算出不同的值 —— 那种错排查起来极其费劲:
+包名和 Release 名对不上,而两处代码看着都对。
+
+`next-version.mjs` 里有一处刻意的选择:**上一个 tag 解析不了时报错停下,不退回
+`v1.0.0`。** 静默退回的话会去发一个早就发过的版本号,而报出来的错是"这个版本发过了",
+跟真正的原因(上一个 tag 看不懂)差着十万八千里。
+
+**另加一道拦截:** release job 开头查一次这个 tag 有没有发过。撞上已存在的 tag 时
+`action-gh-release` 不会报错,而是往那个已有的 Release 上**追加**资产 —— 结果是一个
+Release 里挂着两个不同构建的包,旧的还在。查到就红着停下,并说明怎么办。
+
+放在 release job 开头而不是更早:再往前就得单开一个 job 让 build 依赖它,为一个
+不常犯的错误加一道串行依赖不值。这里失败的代价只是"包没发出去,但产物还在这次运行的
+Artifacts 里",捡得回来。
+
+验证:`release-version.mjs v1.0.1` 在本地真跑过一遍(临时装了它依赖的 commander),
+三处全部改成 `1.0.1`、`v` 前缀正确剥掉;重复版本号的判断拿真实 GitHub API 试过
+—— 已存在的 tag 返回 200(拦下),没发过的返回 404(放行)。
+
+### `release` 不再被无关平台的失败卡住
+
+Release 里**只有 Windows 便携版 zip** —— macOS 的 dmg、Linux 的 deb/rpm 都只躺在
+Artifacts 里。但 `release` 是 `needs: build`,矩阵里任何一条腿失败,整个 build 就算失败,
+release 被跳过。
+
+真发生过一次(2026-09-08,v1.0.0 那轮):macOS ARM 那条腿在**上传产物的最后一步**撞上
+GitHub 产物服务的 403 —— 日志里文件已经找到、65MB 也传完了,挂在 `FinalizeArtifact`。
+于是一个跟 Release 内容毫无关系的产物,把 Windows 的包卡住了,得手动重跑那条腿。
+
+改法:`release` 加 `always()`,不再因为别的平台失败而跳过。
+
+**"那 Windows 真挂了怎么办"** —— 由已有的 `fail_on_unmatched_files: true` 兜底:
+找不到 zip 就红着失败。那道检查本来是为"空 Release"加的,正好也能承担这件事,
+不用再写一层条件。仍然排除 `cancelled`:并发取消(有新构建顶上来)时不该发版。

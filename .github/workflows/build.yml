@@ -30,9 +30,9 @@ on:
         type: boolean
         default: false
       tag:
-        description: '版本号(如 v1.0.0)。留空则发成 dev-<运行号> 的预发布'
+        description: "版本号。auto = 在上一个正式版基础上 +1(推荐);填 vX.Y.Z 则用这个;留空发成 dev-<运行号> 预发布"
         type: string
-        default: ''
+        default: 'auto'
 
 # 同一分支上新的提交会取消还在跑的旧构建,免得排队浪费额度
 concurrency:
@@ -43,6 +43,42 @@ permissions:
   contents: write # 发 Release 需要
 
 jobs:
+  # 定这次构建用哪个版本号。**单独一个 job 算一次**,build 和 release 都用它的输出 ——
+  # 两边各算一次的话,万一中间有人发了个 Release,两边就会算出不同的值,而那种错
+  # 排查起来极其费劲(包名和 Release 名对不上,但两处代码看着都对)。
+  #
+  # 三种情况:
+  #   打了 tag 推上来        → 就用那个 tag
+  #   手动跑,tag = auto      → 上一个正式 Release 的补丁号 +1(dev 预发布不算在内)
+  #   手动跑,tag = vX.Y.Z    → 用这个(要跨小版本/大版本时手动指定)
+  #   手动跑,tag 留空        → 空,表示这是个开发构建,不改版本号也不发正式版
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: pick
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          IN_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          elif [ -z "$IN_TAG" ]; then
+            TAG=""
+          elif [ "$IN_TAG" = "auto" ]; then
+            TAG="$(node scripts/next-version.mjs)"
+          else
+            TAG="$IN_TAG"
+          fi
+          echo "这次构建的版本号:${TAG:-(开发构建,不改版本号)}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   # 前端单元测试。**以前没有这个 job** —— 仓库里一直有 vitest 套件(含
   # deno-push 的推送筛选逻辑),但没有任何东西跑它,等于白写。
   #
@@ -69,6 +105,7 @@ jobs:
       - run: pnpm test
 
   build:
+    needs: version
     strategy:
       # 一个平台挂掉不影响其他平台继续出包
       fail-fast: false
@@ -164,6 +201,22 @@ jobs:
       - name: 装依赖
         run: pnpm i
 
+      # 版本号**由 tag 决定**,不是由仓库里 package.json 那个值决定。
+      #
+      # 为什么:package.json / Cargo.toml / tauri.conf.json 三处都写着版本号,
+      # 而 zip 文件名是从 package.json 拼出来的。靠人记得发版前手动改三处的话,
+      # 忘一次就是两个同名的包 —— v2.5.4-r1 和 v2.5.4-r2 就是这么撞的:
+      # 文件名一模一样、应用里显示的版本一模一样,只有 git tag 不同,而 tag 不在文件里。
+      #
+      # 现在 tag 是唯一的事实来源:dispatch 时填 v1.0.1,出来的就是
+      # Spigot_1.0.1_x64_portable.zip、应用里显示 1.0.1、Release 叫 v1.0.1,三者
+      # 不可能对不上。仓库里 package.json 的值只是开发时的默认值。
+      #
+      # release-version.mjs 是上游自带的(它就是干这个的),之前只是没人调。
+      - name: 用 tag 定版本号
+        if: needs.version.outputs.tag != ''
+        run: pnpm release-version ${{ needs.version.outputs.tag }}
+
       # prebuild 按目标平台下载 mihomo 内核(sidecar)。不跑这步的话
       # tauri 打包时会因为找不到 externalBin 里声明的 verge-mihomo 而失败。
       - name: 下载内核 sidecar
@@ -220,13 +273,52 @@ jobs:
           retention-days: 30
 
   release:
-    # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.release
-    needs: build
+    # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布。
+    #
+    # **加 always() 是有原因的。** 默认情况下 build 里任何一条矩阵腿失败,整个 build
+    # 就算失败,release 被跳过。但 Release 里**只有 Windows 便携版 zip** —— macOS 的
+    # dmg、Linux 的 deb/rpm 都只躺在 Artifacts 里。真发生过一次:macOS ARM 那条腿在
+    # 上传产物的最后一步撞上 GitHub 产物服务的 403(文件已经传完 65MB,挂在 finalize),
+    # 于是一个跟 Release 内容毫无关系的产物,把 Windows 的包卡住了。
+    #
+    # 那"Windows 真的挂了怎么办"?——**由 fail_on_unmatched_files: true 兜底**:
+    # 找不到 zip 就红着失败。那道检查本来就是为"空 Release"加的,正好也能承担这件事,
+    # 不用再写一层条件。
+    #
+    # 仍然排除 cancelled:并发取消(有新构建顶上来)时不该发版。
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.release) && needs.version.result == 'success' && needs.build.result != 'cancelled'
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # 拦住"版本号重复"。action-gh-release 撞上已存在的 tag 不会报错,而是往那个
+      # 已有的 Release 上**追加**资产 —— 结果是一个 Release 里挂着两个不同构建的包,
+      # 而且旧的那个还在。将来自己都分不清下的是哪个。
+      #
+      # 放在 release job 开头而不是更早:再往前就得单开一个 job 让 build 依赖它,
+      # 为一个不常犯的错误加一道串行依赖不值。这里失败的代价只是"包没发出去,
+      # 但产物还在这次运行的 Artifacts 里",捡得回来。
+      - name: 检查这个版本号是不是已经发过
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "没有 tag(开发构建),跳过检查"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG")
+          if [ "$code" = "200" ]; then
+            echo "::error::$TAG 这个 Release 已经存在了。"
+            echo "::error::继续下去会把新包追加到那个已有的 Release 上,两个不同构建混在一起。"
+            echo "::error::换一个版本号重跑,或者先把旧的 Release 和 tag 删掉。"
+            exit 1
+          fi
+          echo "$TAG 没发过(HTTP $code),继续"
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -251,12 +343,12 @@ jobs:
           # 中间那条是为了绕开一个现实限制:某些环境下有推分支的权限、没有推 tag 的权限
           # (git push tag 直接 403)。而 action-gh-release 会在指定 commit 上**自己创建
           # tag**,所以手动跑 + 填版本号,效果跟打 tag 完全一样,不需要额外权限。
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('dev-{0}', github.run_number) }}
+          tag_name: ${{ needs.version.outputs.tag || format('dev-{0}', github.run_number) }}
           # 这一行**必须加引号**。里面的 "构建 #{0}" 有个空格加井号,YAML 会把 ` #` 之后的
           # 内容当成注释整段吃掉,只剩下 "...format('(开发构建" —— 一个没闭合的表达式。
           # GitHub 解析不了这个表达式,会判整个工作流无效:所有触发方式一律不跑,直接
           # startup_failure(连 jobs 都不创建)。这个 workflow 曾经连红 14 次就是它。
-          name: "Spigot ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('(开发构建 #{0})', github.run_number) }}"
+          name: "Spigot ${{ needs.version.outputs.tag || format('(开发构建 #{0})', github.run_number) }}"
           body: |
             **Spigot** —— 基于 Clash Verge Rev 修改，左边导航栏最下面多了一页 **Deno Push**，
             一键把测过、延迟达标的美国节点推给自建的 Deno 订阅服务。
@@ -278,4 +370,4 @@ jobs:
           draft: false
           # 只有"既不是 tag、也没填版本号"的开发构建才算预发布。
           # 手动跑但填了版本号的,跟打 tag 一样是正式发布。
-          prerelease: ${{ github.ref_type != 'tag' && inputs.tag == '' }}
+          prerelease: ${{ needs.version.outputs.tag == '' }}

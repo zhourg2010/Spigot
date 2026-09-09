@@ -15,6 +15,33 @@
 
 许可证跟上游一致:**GNU GPL-3.0-only**,见 [LICENSE](./LICENSE)。
 
+## 发一个新版本
+
+在 Actions 里跑「构建 Spigot」,勾上 `release`,`tag` **保持默认的 `auto`** —— 
+版本号会在上一个正式版基础上自动 +1,你什么都不用想也不用改。
+
+| `tag` 填什么 | 结果 |
+|---|---|
+| `auto`(默认) | 上一个正式 Release 的补丁号 +1。`v1.0.0` → `v1.0.1` |
+| `v1.1.0` | 用这个。要跨小版本 / 大版本时才需要手填 |
+| 留空 | 不发正式版,出一个 `dev-<运行号>` 预发布 |
+
+定下来的版本号会被写进 `package.json` / `Cargo.toml` / `tauri.conf.json`,于是:
+
+    v1.0.1  →  Spigot_1.0.1_x64_portable.zip  →  应用里显示 1.0.1
+
+三者不可能对不上。仓库里 `package.json` 那个版本号只是开发时的默认值。
+
+自动递增只看**正式** Release(`/releases/latest` 本来就跳过 prerelease),
+所以那些 `dev-N` 的开发构建不会把版本号顶上去。
+
+这么做的理由:版本号写在三个文件里,而 zip 文件名是从 `package.json` 拼的。
+靠人记得发版前手动改三处,忘一次就是两个同名的包 —— `v2.5.4-r1` 和 `v2.5.4-r2`
+就是这么撞的,文件名和应用内版本一模一样,只有 git tag 不同,而 **tag 不在文件里**。
+
+填了一个已经发过的版本号,`release` 那一步会红着停下(否则 action-gh-release 会把
+新包**追加**到已有的 Release 上,两个不同构建混在一起)。
+
 ## 下载
 
 打 `v*` 的 tag 会自动构建并发 Release（macOS Apple 芯片 / macOS Intel / Windows / Linux）。
