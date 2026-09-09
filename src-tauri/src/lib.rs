@@ -158,6 +158,10 @@ mod app_init {
             cmd::get_runtime_config,
             cmd::get_proxy_view,
             cmd::get_runtime_yaml,
+            // 探针内核:另起一个 mihomo 专门测免费节点,不碰正在服务的那个
+            cmd::probe_start,
+            cmd::probe_stop,
+            cmd::probe_running,
             cmd::get_runtime_exists,
             cmd::get_runtime_logs,
             cmd::get_runtime_proxy_chain_config,
@@ -460,6 +464,11 @@ pub fn run() -> std::process::ExitCode {
             });
         }
         tauri::RunEvent::Exit => AsyncHandler::block_on(async {
+            // 探针内核是我们自己 spawn 的子进程,不归下面那套 session cleanup 管。
+            // 不在这儿收掉的话,测到一半退出应用会在系统里留一个孤儿 mihomo,
+            // 占着端口、还连着网,而用户完全看不见它。幂等,没在跑就是空操作。
+            cmd::kill_probe_on_exit();
+
             // Windows session ending currently reaches Tao as WM_ENDSESSION and
             // destroys the loop without a preventable ExitRequested event.
             if !handle::Handle::global().is_exiting() {
