@@ -3,7 +3,20 @@ import { describe, expect, it } from 'vitest'
 
 
 import { toShareUri } from './deno-push'
-import { b64decode, buildProbeYaml, checkName, hashOfCheckName, parseShareUri } from './free-pool'
+import {
+  b64decode,
+  buildFreeProfile,
+  buildProbeYaml,
+  type CheckStat,
+  checkName,
+  EMPTY_FILTER,
+  type FreePoolRow,
+  hashOfCheckName,
+  NO_CHECK,
+  okRate,
+  parseShareUri,
+  passesFilter,
+} from './free-pool'
 
 /**
  * 这里最重要的是**往返一致**:拿 toShareUri 生成链接,再 parseShareUri 反解析回来,
@@ -191,5 +204,120 @@ describe('buildProbeYaml', () => {
     expect(sub('reality-opts')['public-key']).toBe('PBK')
     expect(sub('ws-opts')['path']).toBe('/x?a=1')
     expect(sub('ws-opts')['headers']).toEqual({ Host: 'cdn.com' })
+  })
+})
+
+/**
+ * 筛选。这里钉的核心只有一条:**"没测过"和"测过且不通"必须分得开**。
+ *
+ * 混起来的后果是单向的、而且很难发现:刚抓来一整批新节点还没轮到实测,如果被当成
+ * "不通"过滤掉,界面上看到的是一个空列表 —— 用户会以为池子是空的,而不是"还没测"。
+ * 反过来如果把"没测过"当成合格放进去,那筛选条件等于没写。
+ */
+const row = (over: Partial<FreePoolRow> = {}): FreePoolRow => ({
+  uriHash: 'a'.repeat(64),
+  uri: 'ss://x',
+  proto: 'ss',
+  name: '节点',
+  server: 'a.com',
+  port: 443,
+  sourceId: 'src1',
+  seenCount: 5,
+  check: { ...NO_CHECK },
+  ...over,
+})
+
+const withCheck = (c: Partial<CheckStat>, over: Partial<FreePoolRow> = {}) =>
+  row({ ...over, check: { ...NO_CHECK, ...c } })
+
+describe('passesFilter', () => {
+  it('什么都不填时全过 —— 包括从没测过的', () => {
+    expect(passesFilter(row(), EMPTY_FILTER)).toBe(true)
+    expect(passesFilter(withCheck({ checked: 3, ok: 0, lastOk: false }), EMPTY_FILTER)).toBe(true)
+  })
+
+  it('不问实测就不管没测过的:只按协议筛时,没测过的照样留着', () => {
+    const f = { ...EMPTY_FILTER, proto: 'ss' }
+    expect(passesFilter(row(), f)).toBe(true)
+    expect(passesFilter(row({ proto: 'vless' }), f)).toBe(false)
+  })
+
+  it('一问实测就必须有答案:没测过的过不了任何一条跟实测有关的条件', () => {
+    const never = row()
+    expect(passesFilter(never, { ...EMPTY_FILTER, minOkRate: 1 })).toBe(false)
+    expect(passesFilter(never, { ...EMPTY_FILTER, lastMustOk: true })).toBe(false)
+    expect(passesFilter(never, { ...EMPTY_FILTER, maxMedianMs: 5000 })).toBe(false)
+    expect(passesFilter(never, { ...EMPTY_FILTER, minChecked: 1 })).toBe(false)
+  })
+
+  it('lastOk 是 null(没测过)不能当成 true', () => {
+    // 当成 true 的话,"最后一次必须通"这个条件会把整池还没轮到的节点全放进去,
+    // 而用户以为自己筛的是"确认还活着的"
+    expect(passesFilter(withCheck({ lastOk: null }), { ...EMPTY_FILTER, lastMustOk: true })).toBe(false)
+    expect(passesFilter(withCheck({ checked: 1, ok: 1, lastOk: true }), { ...EMPTY_FILTER, lastMustOk: true })).toBe(true)
+    expect(passesFilter(withCheck({ checked: 1, ok: 0, lastOk: false }), { ...EMPTY_FILTER, lastMustOk: true })).toBe(false)
+  })
+
+  it('通过率按测过的次数算,不按总轮数', () => {
+    // 每轮只抽一小批,所以"3 轮里通了 2 轮"说的是"它自己被测的 3 次里通了 2 次"
+    const r = withCheck({ checked: 3, ok: 2, lastOk: true })
+    expect(okRate(r.check)).toBe(67)
+    expect(passesFilter(r, { ...EMPTY_FILTER, minOkRate: 60 })).toBe(true)
+    expect(passesFilter(r, { ...EMPTY_FILTER, minOkRate: 70 })).toBe(false)
+  })
+
+  it('延迟上限:一次都没通过的(medianMs 为 null)不算达标', () => {
+    const dead = withCheck({ checked: 2, ok: 0, lastOk: false, medianMs: null })
+    expect(passesFilter(dead, { ...EMPTY_FILTER, maxMedianMs: 800 })).toBe(false)
+    const fast = withCheck({ checked: 2, ok: 2, lastOk: true, medianMs: 300 })
+    expect(passesFilter(fast, { ...EMPTY_FILTER, maxMedianMs: 800 })).toBe(true)
+    expect(passesFilter(fast, { ...EMPTY_FILTER, maxMedianMs: 200 })).toBe(false)
+  })
+
+  it('关键词搜名字、服务器和来源', () => {
+    const r = row({ name: '香港 01', server: 'hk.example.com', sourceId: 'github-abc' })
+    for (const kw of ['香港', 'hk.exa', 'github']) {
+      expect(passesFilter(r, { ...EMPTY_FILTER, kw })).toBe(true)
+    }
+    expect(passesFilter(r, { ...EMPTY_FILTER, kw: '日本' })).toBe(false)
+  })
+
+  it('多个条件是"与"的关系', () => {
+    const r = withCheck({ checked: 5, ok: 5, lastOk: true, medianMs: 200 }, { proto: 'vless', seenCount: 9 })
+    const f = { ...EMPTY_FILTER, proto: 'vless', minChecked: 3, minOkRate: 90, lastMustOk: true, maxMedianMs: 500, minSeen: 5 }
+    expect(passesFilter(r, f)).toBe(true)
+    expect(passesFilter(r, { ...f, minSeen: 10 })).toBe(false)
+  })
+})
+
+describe('buildFreeProfile', () => {
+  const nodes = [
+    { name: '[免费] a', type: 'ss', server: 'a.com', port: 1, cipher: 'aes-256-gcm', password: 'p' },
+    { name: '[免费] b', type: 'ss', server: 'b.com', port: 2, cipher: 'aes-256-gcm', password: 'q' },
+  ]
+
+  it('是一份自足的配置:节点、两个组、一条规则', () => {
+    const c = yaml.load(buildFreeProfile(nodes as never)) as Record<string, never>
+    expect(c.proxies).toEqual(nodes)
+    expect((c['proxy-groups'] as unknown as { name: string }[]).map((g) => g.name)).toEqual([
+      '免费节点',
+      '自动选择',
+    ])
+    expect(c.rules).toEqual(['MATCH,免费节点'])
+  })
+
+  it('不写端口 / DNS / tun —— 那些由「设置」注入,写死会跟界面上的选择打架', () => {
+    const c = yaml.load(buildFreeProfile(nodes as never)) as Record<string, unknown>
+    for (const k of ['mixed-port', 'port', 'socks-port', 'dns', 'tun', 'mode', 'allow-lan']) {
+      expect(c[k]).toBeUndefined()
+    }
+  })
+
+  it('自动选择组里是全部节点,手动组把自动选择排在最前', () => {
+    const c = yaml.load(buildFreeProfile(nodes as never)) as {
+      'proxy-groups': { name: string; proxies: string[] }[]
+    }
+    expect(c['proxy-groups'][0].proxies).toEqual(['自动选择', '[免费] a', '[免费] b'])
+    expect(c['proxy-groups'][1].proxies).toEqual(['[免费] a', '[免费] b'])
   })
 })

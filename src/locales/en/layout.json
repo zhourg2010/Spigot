@@ -10,7 +10,8 @@
         "logs": "Logs",
         "unlock": "Test",
         "settings": "Settings",
-        "denoPush": "Deno Push"
+        "denoPush": "Deno Push",
+        "freePool": "Free Pool"
       },
       "menu": {
         "reorderMode": "Menu reorder mode",

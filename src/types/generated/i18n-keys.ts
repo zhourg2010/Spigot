@@ -120,6 +120,7 @@ export const translationKeys = [
   'layout.components.navigation.tabs.unlock',
   'layout.components.navigation.tabs.settings',
   'layout.components.navigation.tabs.denoPush',
+  'layout.components.navigation.tabs.freePool',
   'layout.components.navigation.menu.reorderMode',
   'layout.components.navigation.menu.restoreDefaultOrder',
   'layout.components.navigation.menu.unlock',

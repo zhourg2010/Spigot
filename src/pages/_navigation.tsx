@@ -4,6 +4,7 @@ import ForkRightOutlinedIcon from '@mui/icons-material/ForkRightOutlined'
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined'
 import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined'
 import LockOpenOutlinedIcon from '@mui/icons-material/LockOpenOutlined'
+import PublicOutlinedIcon from '@mui/icons-material/PublicOutlined'
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
 import SubjectOutlinedIcon from '@mui/icons-material/SubjectOutlined'
 import WifiOutlinedIcon from '@mui/icons-material/WifiOutlined'
@@ -21,6 +22,7 @@ import UnlockSvg from '@/assets/image/itemicon/unlock.svg?react'
 import { navigationItems } from './_navigation-meta'
 import ConnectionsPage from './connections'
 import DenoPushPage from './deno-push'
+import FreePoolPage from './free-pool'
 import HomePage from './home'
 import LogsPage from './logs'
 import ProfilePage from './profiles'
@@ -86,5 +88,13 @@ export const navItems: NavigationItem[] = [
       <CloudUploadOutlinedIcon key="svg" />,
     ],
     Component: DenoPushPage,
+  },
+  {
+    ...navigationItems.freePool,
+    icon: [
+      <PublicOutlinedIcon key="mui" />,
+      <PublicOutlinedIcon key="svg" />,
+    ],
+    Component: FreePoolPage,
   },
 ]

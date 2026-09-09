@@ -28,4 +28,8 @@ export const navigationItems = {
     label: 'layout.components.navigation.tabs.denoPush',
     path: '/deno-push',
   },
+  freePool: {
+    label: 'layout.components.navigation.tabs.freePool',
+    path: '/free-pool',
+  },
 } as const

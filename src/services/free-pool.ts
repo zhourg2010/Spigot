@@ -33,8 +33,28 @@ import { invoke } from '@tauri-apps/api/core'
 import { fetch } from '@tauri-apps/plugin-http'
 import * as yaml from 'js-yaml'
 
+import { createProfile } from './cmds'
 import { mapPool } from './deno-push'
 import type { ClashProxy, DenoPushSettings } from './deno-push'
+
+/**
+ * 一个节点在服务端保留的那几轮里的实测战绩。跟 Deno 端 store.ts 的 CheckStat 对齐。
+ *
+ * **`lastOk` 是 `boolean | null`,null 表示从没测过 —— 跟 false 不是一回事。**
+ * 当成 false 的话,一整池刚抓来还没轮到的节点会被判成"不通",而它们只是还没排上队。
+ */
+export interface CheckStat {
+  /** 被测过几次。0 = 从来没测过 */
+  checked: number
+  /** 其中通了几次 */
+  ok: number
+  /** 最后一次的结果。没测过是 null */
+  lastOk: boolean | null
+  /** 最后一次测的时间,'MM-DD HH:MM'。没测过是空串 */
+  lastTs: string
+  /** 通的那几次的延迟中位数。一次都没通过是 null */
+  medianMs: number | null
+}
 
 /** 从 /free/pool?format=json 拿到的一行。字段名跟 Deno 端 store.ts 的 toRow 对齐。 */
 export interface FreePoolRow {
@@ -46,6 +66,16 @@ export interface FreePoolRow {
   port: number
   sourceId: string
   seenCount: number
+  check: CheckStat
+}
+
+/** 服务端没带 check 字段时(老版本部署)的兜底,免得界面上到处判 undefined。 */
+export const NO_CHECK: CheckStat = {
+  checked: 0,
+  ok: 0,
+  lastOk: null,
+  lastTs: '',
+  medianMs: null,
 }
 
 /** 一个节点的实测结果,直接就是 POST /free/verify 要的形状。 */
@@ -308,8 +338,9 @@ function poolUrlOf(pushUrl: string, path: string): string | null {
 export async function fetchFreePool(
   settings: DenoPushSettings,
   limit: number,
+  order: 'popular' | 'stale' = 'popular',
 ): Promise<FreePoolRow[]> {
-  const url = poolUrlOf(settings.pushUrl, `/free/pool?format=json&limit=${limit}`)
+  const url = poolUrlOf(settings.pushUrl, `/free/pool?format=json&limit=${limit}&order=${order}`)
   if (!url) throw new Error('推送地址不是一个合法网址,拉不了免费池')
   const resp = await fetch(url, {
     headers: { authorization: `Bearer ${settings.pushKey}` },
@@ -317,7 +348,9 @@ export async function fetchFreePool(
   })
   if (!resp.ok) throw new Error(`拉免费池失败:HTTP ${resp.status} ${await resp.text()}`)
   const data = (await resp.json()) as { nodes?: FreePoolRow[] }
-  return data.nodes ?? []
+  // check 字段是后加的。服务端还没更新时这里是 undefined,补上兜底,
+  // 免得下游每个筛选条件都得先判一次"有没有这个字段"。
+  return (data.nodes ?? []).map((n) => (n.check ? n : { ...n, check: NO_CHECK }))
 }
 
 /** 每轮的通过率,新的在前。服务端只留最近 keepRounds 轮。 */
@@ -494,7 +527,9 @@ export async function runVerifyRound(
   const say = (m: string) => onProgress?.(m)
 
   say('拉取免费节点池…')
-  const rows = await fetchFreePool(settings, opts.limit)
+  // stale:最久没测的优先。默认顺序是确定性的,每轮拿到的会是同一批 ——
+  // 测七轮等于把同样那几十条测了七遍,池子里其余几千条一次都轮不到。
+  const rows = await fetchFreePool(settings, opts.limit, 'stale')
   if (rows.length === 0) throw new Error('免费池是空的,先去后台跑一轮抓取')
 
   say(`解析 ${rows.length} 条分享链接…`)
@@ -554,4 +589,169 @@ export async function runVerifyRound(
     saved: r.saved,
     skipped: r.skipped,
   }
+}
+
+// ---------------------------------------------------------------- 筛选
+
+/**
+ * 免费池的筛选条件。**每一条都是可选的** —— 判据由用户在界面上定,这里不替他预设
+ * 任何"什么算好节点"。
+ *
+ * 之所以全做成开关而不是写死一套判据:免费池的成色随时间变化很大。源好的时候
+ * "测过 3 次全通"能筛出几百条,源烂的时候同样的条件一条都没有,而用户看到的是
+ * 一个空列表,不知道是没节点还是条件太严。让他自己松紧,至少知道自己在做什么。
+ */
+export interface PoolFilter {
+  /** 名字 / 服务器 / 来源里搜这个词 */
+  kw: string
+  /** 只要这个协议。'' = 不限 */
+  proto: string
+  /** 只要这个来源。'' = 不限 */
+  sourceId: string
+  /** 至少被测过几次。0 = 不限(没测过的也留着) */
+  minChecked: number
+  /** 通过率至少百分之几(0~100)。只在 checked > 0 时有意义 */
+  minOkRate: number
+  /** 最后一次必须是通的 */
+  lastMustOk: boolean
+  /** 延迟中位数上限(毫秒)。0 = 不限 */
+  maxMedianMs: number
+  /** 抓取时至少出现过几次(seen_count) */
+  minSeen: number
+}
+
+export const EMPTY_FILTER: PoolFilter = {
+  kw: '',
+  proto: '',
+  sourceId: '',
+  minChecked: 0,
+  minOkRate: 0,
+  lastMustOk: false,
+  maxMedianMs: 0,
+  minSeen: 0,
+}
+
+/** 通过率,百分数。一次没测过是 0 —— 但别拿它当"测了都不通",那是 minChecked 管的事。 */
+export function okRate(c: CheckStat): number {
+  return c.checked > 0 ? Math.round((c.ok / c.checked) * 100) : 0
+}
+
+/**
+ * 一条节点过不过筛。
+ *
+ * **没测过的节点怎么办**,是这个函数唯一需要想清楚的事:
+ *
+ * - `minChecked` 是 0 时,没测过的**留着**。它们只是还没排上队,不是不通。
+ *   刚抓来一批新节点、还没跑过实测,这时候把它们全滤掉等于告诉用户"池子是空的"。
+ * - 只要用了任何一条**跟实测有关**的条件(通过率、最后一次必须通、延迟上限),
+ *   没测过的就**过不了** —— 因为这些条件对它们无从判断,放过去等于默认它们合格。
+ *
+ * 换句话说:不问就不管,一问就必须有答案。
+ */
+export function passesFilter(r: FreePoolRow, f: PoolFilter): boolean {
+  if (f.proto && r.proto !== f.proto) return false
+  if (f.sourceId && r.sourceId !== f.sourceId) return false
+  if (f.minSeen > 0 && r.seenCount < f.minSeen) return false
+
+  const c = r.check ?? NO_CHECK
+  if (f.minChecked > 0 && c.checked < f.minChecked) return false
+
+  // 下面三条都要求"测过"。没测过的在这里被挡掉,不是因为它不通,
+  // 而是因为用户问了一个对它无法回答的问题。
+  if (f.minOkRate > 0 && (c.checked === 0 || okRate(c) < f.minOkRate)) return false
+  if (f.lastMustOk && c.lastOk !== true) return false
+  if (f.maxMedianMs > 0 && (c.medianMs == null || c.medianMs > f.maxMedianMs)) return false
+
+  if (f.kw) {
+    const k = f.kw.trim().toLowerCase()
+    if (
+      k &&
+      !r.name.toLowerCase().includes(k) &&
+      !r.server.toLowerCase().includes(k) &&
+      !r.sourceId.toLowerCase().includes(k)
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+// ---------------------------------------------------------------- 生成本地 profile
+
+/**
+ * 挑出来的免费节点 → 一份完整的 Clash 配置。
+ *
+ * ## 为什么是**独立的一份**,不往现有配置里合
+ *
+ * 上游 `enhance/merge.rs` 的 `deep_merge` 对非 mapping 一律 `*a = b` —— 往 merge
+ * profile 里写 `proxies:` 会把你真正的节点**整个替换掉**,不是追加。这条已经查证过
+ * (`merge.rs` 的测试夹具里那个 `append-proxies` 只是夹具,实现里没有对应处理,
+ * 而且那个测试根本没断言)。所以这里生成的是一份**自足的 local profile**,
+ * 你在配置列表里手动切过去用,切回来什么都没变。
+ *
+ * ## 配置里放什么
+ *
+ * 一个 `select` 组(手动挑)+ 一个 `url-test` 组(自动挑最快的),规则只有一条
+ * `MATCH`。**刻意不写端口、DNS、tun 这些** —— 那些是 Clash Verge Rev 自己按你在
+ * 「设置」里的选择注入的(`enhance/mod.rs`),在 profile 里写死会跟界面上的设置打架:
+ * 界面显示一套、实际生效另一套,而且看不出为什么。
+ */
+export function buildFreeProfile(nodes: ClashProxy[], title = '免费节点'): string {
+  const names = nodes.map((n) => n.name)
+  const config = {
+    proxies: nodes,
+    'proxy-groups': [
+      { name: title, type: 'select', proxies: ['自动选择', ...names] },
+      {
+        name: '自动选择',
+        type: 'url-test',
+        proxies: names,
+        url: DEFAULT_VERIFY.testUrl,
+        interval: 300,
+        tolerance: 50,
+      },
+    ],
+    rules: [`MATCH,${title}`],
+  }
+  return yaml.dump(config, { lineWidth: -1 })
+}
+
+/**
+ * 把选中的免费节点做成一份本地 profile。返回实际写进去几个节点。
+ *
+ * 名字用**原始名字加前缀**而不是实测时那个 `chk-<hash>`:实测期间用哈希是为了不跟
+ * 你自己的节点重名、不坏 YAML;但这份配置是给人看的,一列 `chk-a1b2c3` 没法用。
+ * 前缀留着,是为了在代理列表里一眼认出哪些是免费来的。
+ *
+ * 重名会让 mihomo **拒绝加载整份配置**,所以同名的后面补序号。
+ */
+export async function createFreeProfile(
+  rows: FreePoolRow[],
+  title = '免费节点',
+): Promise<number> {
+  const used = new Set<string>()
+  const nodes: ClashProxy[] = []
+  for (const r of rows) {
+    const p = parseShareUri(r.uri)
+    if (!p) continue
+    // 名字可能有 emoji、引号、换行 —— 换行会直接坏掉 YAML 的块结构,先清掉
+    const base = `[免费] ${(r.name || r.server).replace(/\s+/g, ' ').trim()}`.slice(0, 60)
+    let name = base
+    for (let i = 2; used.has(name); i++) name = `${base} ${i}`
+    used.add(name)
+    nodes.push({ ...p, name })
+  }
+  if (nodes.length === 0) throw new Error('选中的这些一条都解析不出来,生成不了配置')
+
+  await createProfile(
+    {
+      type: 'local',
+      name: title,
+      desc: `免费池实测挑出来的 ${nodes.length} 个,${new Date().toLocaleString()}`,
+      url: '',
+      option: { with_proxy: false, self_proxy: false },
+    },
+    buildFreeProfile(nodes, title),
+  )
+  return nodes.length
 }

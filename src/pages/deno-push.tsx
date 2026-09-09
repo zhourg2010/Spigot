@@ -2,11 +2,13 @@
  * deno-push.tsx — 「Deno Push」页:看当前内核里都有哪些节点,挑一批推给自建订阅服务,
  * 以及一个让订阅服务立刻装死的总开关。
  *
- * 页面分四块:
+ * 页面分三块:
  *   1. 服务开关   订阅服务现在开着还是关着,一键切
  *   2. 工具条     扫描 / 过滤 / 选中多少 / 推送
- *   3. 免费池实测 把服务器上攒的免费节点拉下来实拨一遍,结果存回去(见 free-pool-verify.tsx)
- *   4. 节点表     内核当前加载的全部节点,连推不了的也列出来
+ *   3. 节点表     内核当前加载的全部节点,连推不了的也列出来
+ *
+ * 免费节点池不在这一页 —— 它是另一件事(陌生链接 → 实测 → 挑出还活着的),
+ * 单独一页,见 pages/free-pool.tsx。
  *
  * **推不了的节点也显示**,只是行是灰的、勾选框禁用。看得见"这个节点为什么没被推"
  * (延迟没测、GeoIP 不是美国、缺字段转不出链接)比它默默消失有用得多 ——
@@ -38,7 +40,6 @@ import {
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 
 import { BasePage } from '@/components/base'
-import FreePoolVerify from '@/components/deno-push/free-pool-verify'
 import NodeTable, { pushable } from '@/components/deno-push/node-table'
 import {
   carryOverReach,
@@ -481,11 +482,6 @@ const DenoPushPage = () => {
           </Box>
         )}
       </Card>
-
-      {/* ---- 免费池实测 ---- */}
-      {/* 单独一个组件:它有自己的一套状态(轮次、进度、历轮汇总),混进这一页的话
-          搜索框每敲一个字符都会带着它一起重渲,而那跟它毫无关系。 */}
-      <FreePoolVerify settings={settings} />
 
       {/* ---- 服务器上现在那批 ---- */}
       {remote && (

@@ -10,7 +10,8 @@
         "logs": "日 志",
         "unlock": "测 试",
         "settings": "设 置",
-        "denoPush": "Deno Push"
+        "denoPush": "Deno Push",
+        "freePool": "免费池"
       },
       "menu": {
         "reorderMode": "菜单排序模式",
