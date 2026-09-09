@@ -1,7 +1,9 @@
+import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
+
 import { toShareUri } from './deno-push'
-import { b64decode, checkName, hashOfCheckName, parseShareUri } from './free-pool'
+import { b64decode, buildProbeYaml, checkName, hashOfCheckName, parseShareUri } from './free-pool'
 
 /**
  * 这里最重要的是**往返一致**:拿 toShareUri 生成链接,再 parseShareUri 反解析回来,
@@ -118,5 +120,76 @@ describe('b64decode', () => {
 
   it('解不开返回空串,不抛', () => {
     expect(b64decode('!!!!')).toBe('')
+  })
+})
+
+/**
+ * 探针配置里的 proxies 片段。
+ *
+ * 这块最容易在**真实数据**上翻车:免费节点的密码、路径、名字是从公开仓库抓来的,
+ * 引号、冒号、井号、反斜杠什么都有。手拼字符串一定会在某条上出事,而出事的表现是
+ * **整个探针起不来** —— 报错只会说"内核没起来",看不出是哪一条的问题。
+ *
+ * 所以这里验的是:片段塞回 `proxies:` 底下之后仍是合法 YAML,而且解析回来跟原对象
+ * 一模一样。
+ */
+const wrap = (frag: string): { proxies: Record<string, unknown>[] } =>
+  yaml.load(`mixed-port: 0\nproxies:\n${frag}\nrules:\n  - MATCH,DIRECT\n`) as never
+
+describe('buildProbeYaml', () => {
+  it('普通节点原样往返', () => {
+    const nodes = [{ name: 'chk-aaa', type: 'ss', server: 'a.com', port: 8388, cipher: 'aes-256-gcm', password: 'pw' }]
+    expect(wrap(buildProbeYaml(nodes as never)).proxies).toEqual(nodes)
+  })
+
+  it('密码里有引号、冒号、井号、反斜杠', () => {
+    const nodes = [{ name: 'chk-bbb', type: 'trojan', server: 'b.com', port: 443, password: `a"b'c:d#e\\f g` }]
+    expect(wrap(buildProbeYaml(nodes as never)).proxies).toEqual(nodes)
+  })
+
+  it('ws path 里有井号和问号', () => {
+    const nodes = [{
+      name: 'chk-ccc', type: 'vless', server: 'c.com', port: 443, uuid: 'u',
+      network: 'ws', 'ws-opts': { path: '/x?a=1#frag', headers: { Host: 'h.com' } },
+    }]
+    expect(wrap(buildProbeYaml(nodes as never)).proxies).toEqual(nodes)
+  })
+
+  it('看起来像布尔/数字的密码不能被 YAML 降级', () => {
+    // 经典坑:password: yes → true,password: 0755 → 八进制数。
+    // 降级之后 mihomo 拿到的就不是原来那个密码了,节点必然连不上,
+    // 而它会被记成"测过了,不通" —— 数据被污染,还查不出原因。
+    const nodes = [
+      { name: 'chk-d', type: 'trojan', server: 'd.com', port: 443, password: 'yes' },
+      { name: 'chk-e', type: 'trojan', server: 'e.com', port: 443, password: '0755' },
+      { name: 'chk-f', type: 'trojan', server: 'f.com', port: 443, password: '1.20' },
+    ]
+    const got = wrap(buildProbeYaml(nodes as never)).proxies
+    expect(got.map((p) => p.password)).toEqual(['yes', '0755', '1.20'])
+    for (const p of got) expect(typeof p.password).toBe('string')
+  })
+
+  it('几十条一起仍是合法 YAML', () => {
+    const nodes = Array.from({ length: 60 }, (_, i) => ({
+      name: `chk-${String(i).padStart(12, '0')}`, type: 'ss', server: `n${i}.com`,
+      port: 1000 + i, cipher: 'aes-256-gcm', password: `p#${i}:'"`,
+    }))
+    const got = wrap(buildProbeYaml(nodes as never)).proxies
+    expect(got).toHaveLength(60)
+    expect(got[59]).toEqual(nodes[59])
+  })
+
+  it('从真实分享链接一路走到 YAML,嵌套字段不丢', () => {
+    const uri =
+      'vless://11111111-2222-3333-4444-555555555555@a.example.com:443' +
+      '?encryption=none&security=reality&pbk=PBK&sid=ab&sni=www.apple.com' +
+      '&type=ws&path=%2Fx%3Fa%3D1&host=cdn.com#%E8%8A%82%E7%82%B9'
+    const p = parseShareUri(uri)
+    expect(p).not.toBeNull()
+    const got = wrap(buildProbeYaml([{ ...p!, name: 'chk-hhh' }])).proxies[0]
+    const sub = (k: string) => got[k] as Record<string, unknown>
+    expect(sub('reality-opts')['public-key']).toBe('PBK')
+    expect(sub('ws-opts')['path']).toBe('/x?a=1')
+    expect(sub('ws-opts')['headers']).toEqual({ Host: 'cdn.com' })
   })
 })

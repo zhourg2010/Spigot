@@ -102,6 +102,9 @@ jobs:
       # 先查 Tauri 权限。ACL 是按命令授权的,少一条不会有编译错误,只会在用户点下去
       # 的那一刻报 "not allowed by ACL" —— 这一条已经栽过两次。这步几百毫秒。
       - run: pnpm check:caps
+      # 类型检查。build 里的 web:build 也会跑 tsc,但那要等二十分钟的 Rust 编译,
+      # 而且四个平台各报一遍同一个错。放在这儿一分钟就知道。
+      - run: pnpm typecheck
       - run: pnpm test
 
   build:

@@ -8,19 +8,18 @@
  * 失效或被封,不是端口关闭**:服务器还在跑、端口还开着、TLS 还握手成功,但 uuid
  * 早就作废了。所以"能不能用"只有真的拨一次才知道,而这台机器上正好有 mihomo。
  *
- * ## 怎么让内核认识这些节点
+ * ## 为什么另起一个进程,而不是把节点塞进你自己的配置
  *
- * mihomo 的 `/proxies/{name}/delay`(也就是 `delayProxyByName`)**只能测配置里已经
- * 加载的节点**。免费池不在你的订阅里,所以得先塞进去。
+ * mihomo 的 `/proxies/{name}/delay` **只能测配置里已经加载的节点**,所以免费池得先
+ * 进内核。往用户正在用的那份配置里塞是能做到的(Clash Verge Rev 的 `proxies` 类型
+ * profile 就干这个),但代价太大:几十上百条来路不明的节点会出现在代理选择列表里,
+ * 会被 `use_seq` 塞进第一个策略组,重载配置那一下**正在走的连接会断**,而且中途出
+ * 任何岔子——崩溃、断电、用户点了别的——这些节点就留在配置里了。
  *
- * 用的是 Clash Verge Rev 自带的 **`proxies` 类型 profile** —— 文件内容是
- * `{prepend, append, delete}`,`enhance/seq.rs` 的 `use_seq` 会把 `append` 里的节点
- * **追加**到运行时 `proxies` 列表(不是替换),然后 `enhance_profiles` 让内核重载。
- * 这是上游的一等机制,不是往配置里硬塞。
- *
- * **一个副作用得知道:** `use_seq` 追加之后,还会把这些名字塞进第一个 selector 类型的
- * 策略组(seq.rs:92 起)。所以测试期间这批节点会出现在代理选择列表里 —— 不会被自动
- * 选中、不影响路由,但看着乱。测完清空 append 就没了。
+ * 测一批节点不值得动用户手里那份能上网的配置。所以这里单独起一个 mihomo:
+ * `mixed-port: 0`(不监听任何代理端口,不可能跟主内核抢)、只开一个随机端口的
+ * external-controller、规则只有一条 `MATCH,DIRECT`。它只用来拨号,测完就杀。
+ * 进程管理在 `src-tauri/src/cmd/probe.rs`,退出时也会兜底杀一次。
  *
  * ## 节点名用哈希,不用原名
  *
@@ -30,8 +29,11 @@
  * uri_hash 传给服务端,不用另外维护一张表。
  */
 
+import { invoke } from '@tauri-apps/api/core'
 import { fetch } from '@tauri-apps/plugin-http'
+import * as yaml from 'js-yaml'
 
+import { mapPool } from './deno-push'
 import type { ClashProxy, DenoPushSettings } from './deno-push'
 
 /** 从 /free/pool?format=json 拿到的一行。字段名跟 Deno 端 store.ts 的 toRow 对齐。 */
@@ -199,8 +201,9 @@ export function parseShareUri(uri: string): ClashProxy | null {
  *   ss://base64(method:password@host:port)#name        老写法(整段都编码了)
  */
 function parseSs(u: URL, name: string): ClashProxy | null {
-  let method = ''
-  let password = ''
+  // 不给初值:两条分支都必然赋值或者提前 return,给个 '' 只会掩盖漏赋值的分支
+  let method: string
+  let password: string
   let server = u.hostname
   let port = Number(u.port)
 
@@ -317,6 +320,34 @@ export async function fetchFreePool(
   return data.nodes ?? []
 }
 
+/** 每轮的通过率,新的在前。服务端只留最近 keepRounds 轮。 */
+export interface RoundStat {
+  round: number
+  /** 'MM-DD HH:MM',服务端拼好的 */
+  ts: string
+  total: number
+  ok: number
+  medianMs: number | null
+}
+
+/**
+ * 拉历轮汇总。
+ *
+ * 单看一轮的数字说明不了什么 —— 免费池本来就是通一半、坏一半。要看的是**趋势**:
+ * 通过率一路往下,说明抓来的源在烂掉;突然掉到零,那多半是本机网络的问题,不是节点。
+ */
+export async function fetchRounds(settings: DenoPushSettings): Promise<RoundStat[]> {
+  const url = poolUrlOf(settings.pushUrl, '/free/verify')
+  if (!url) throw new Error('推送地址不是一个合法网址,拉不了历轮汇总')
+  const resp = await fetch(url, {
+    headers: { authorization: `Bearer ${settings.pushKey}` },
+    connectTimeout: 30000,
+  })
+  if (!resp.ok) throw new Error(`拉历轮汇总失败:HTTP ${resp.status} ${await resp.text()}`)
+  const data = (await resp.json()) as { rounds?: RoundStat[] }
+  return data.rounds ?? []
+}
+
 /** 把一轮结果传回服务端。轮号由服务端分配。 */
 export async function reportChecks(
   settings: DenoPushSettings,
@@ -336,4 +367,191 @@ export async function reportChecks(
   const text = await resp.text()
   if (!resp.ok) throw new Error(`回传失败:HTTP ${resp.status} ${text}`)
   return JSON.parse(text) as { round: number; saved: number; skipped: number }
+}
+
+// ---------------------------------------------------------------- 探针内核
+
+interface ProbeInfo {
+  port: number
+  secret: string
+}
+
+/**
+ * 待测节点 → 探针配置里 `proxies:` 底下那一段。
+ *
+ * 用 js-yaml 生成而不是手拼字符串:节点里什么字符都可能有(密码里的引号、路径里的
+ * 井号、名字里的冒号),手拼一定会在某条数据上翻车,而翻车的表现是整个探针起不来,
+ * 却看不出是哪一条的问题。
+ */
+export function buildProbeYaml(nodes: ClashProxy[]): string {
+  // 顶层是个序列,dump 出来是 "- name: ...",再整体缩进两格塞进 proxies: 下面
+  return yaml
+    .dump(nodes, { lineWidth: -1 })
+    .split('\n')
+    .map((l: string) => (l ? `  ${l}` : l))
+    .join('\n')
+}
+
+/** 探针起来之后要等它把 controller 端口监听上。轮询 /version,通了才算好。 */
+async function waitReady(info: ProbeInfo, timeoutMs = 15000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastErr = ''
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${info.port}/version`, {
+        headers: { authorization: `Bearer ${info.secret}` },
+        connectTimeout: 2000,
+      })
+      if (r.ok) return
+      lastErr = `HTTP ${r.status}`
+    } catch (e) {
+      lastErr = String(e)
+    }
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  // 起不来最常见的原因是配置里有条节点 mihomo 不认(比如协议参数缺字段)。
+  // 把最后一次的错带上,不然只有一句"超时",无从查起。
+  throw new Error(`探针内核 ${timeoutMs / 1000} 秒内没起来(最后一次:${lastErr})`)
+}
+
+/** 通过探针测一个节点。返回延迟毫秒;不通返回 null 并带上原因。 */
+async function delayOne(
+  info: ProbeInfo,
+  name: string,
+  testUrl: string,
+  timeout: number,
+): Promise<{ ms: number | null; err: string }> {
+  const u =
+    `http://127.0.0.1:${info.port}/proxies/${encodeURIComponent(name)}/delay` +
+    `?url=${encodeURIComponent(testUrl)}&timeout=${timeout}`
+  try {
+    const r = await fetch(u, {
+      headers: { authorization: `Bearer ${info.secret}` },
+      // 比内核自己的超时多给 5 秒:让内核先超时并告诉我们原因,
+      // 而不是 HTTP 这一层先断掉、我们只知道"没响应"
+      connectTimeout: timeout + 5000,
+    })
+    const text = await r.text()
+    if (!r.ok) {
+      // mihomo 拨不通时返回 4xx/5xx + {"message":"..."}
+      let msg = text.slice(0, 120)
+      try {
+        msg = String((JSON.parse(text) as { message?: string }).message ?? msg)
+      } catch {
+        /* 不是 JSON 就用原文 */
+      }
+      return { ms: null, err: msg }
+    }
+    const d = (JSON.parse(text) as { delay?: number }).delay
+    return typeof d === 'number' && d > 0
+      ? { ms: d, err: '' }
+      : { ms: null, err: '内核返回的延迟不是正数' }
+  } catch (e) {
+    return { ms: null, err: String(e).slice(0, 120) }
+  }
+}
+
+export interface VerifyOptions {
+  /** 这一轮测多少条 */
+  limit: number
+  /** 拿什么地址判定"通" */
+  testUrl: string
+  /** 单条超时(毫秒) */
+  timeout: number
+  /** 同时拨几个 */
+  concurrency: number
+}
+
+export const DEFAULT_VERIFY: VerifyOptions = {
+  limit: 50,
+  testUrl: 'http://www.gstatic.com/generate_204',
+  timeout: 5000,
+  concurrency: 8,
+}
+
+export interface VerifyReport {
+  fetched: number
+  /** 解析不出 Clash 节点的条数 —— 这些没测,也没上报 */
+  unparsable: number
+  tested: number
+  ok: number
+  round: number
+  saved: number
+  skipped: number
+}
+
+/**
+ * 跑完整的一轮:拉池子 → 起探针 → 逐个拨 → 回传 → 收摊。
+ *
+ * **无论中间哪一步炸,探针都会被杀掉**(finally)。留一个孤儿 mihomo 在系统里
+ * 是这个功能最讨厌的失败方式:它占着端口、还连着网,而用户完全看不见。
+ */
+export async function runVerifyRound(
+  settings: DenoPushSettings,
+  opts: VerifyOptions,
+  onProgress?: (msg: string) => void,
+): Promise<VerifyReport> {
+  const say = (m: string) => onProgress?.(m)
+
+  say('拉取免费节点池…')
+  const rows = await fetchFreePool(settings, opts.limit)
+  if (rows.length === 0) throw new Error('免费池是空的,先去后台跑一轮抓取')
+
+  say(`解析 ${rows.length} 条分享链接…`)
+  const nodes: ClashProxy[] = []
+  const hashOf = new Map<string, string>()
+  for (const r of rows) {
+    const p = parseShareUri(r.uri)
+    if (!p) continue
+    const name = checkName(r.uriHash)
+    nodes.push({ ...p, name })
+    hashOf.set(name, r.uriHash)
+  }
+  const unparsable = rows.length - nodes.length
+  if (nodes.length === 0) throw new Error(`${rows.length} 条链接一条都解析不了`)
+
+  say(`启动探针内核(${nodes.length} 个节点)…`)
+  const info = await invoke<ProbeInfo>('probe_start', {
+    proxiesYaml: buildProbeYaml(nodes),
+  })
+
+  const results: CheckResult[] = []
+  try {
+    await waitReady(info)
+
+    let done = 0
+    await mapPool(
+      nodes,
+      opts.concurrency,
+      async (n: ClashProxy) => {
+        const { ms, err } = await delayOne(info, n.name, opts.testUrl, opts.timeout)
+        results.push({
+          uriHash: hashOf.get(n.name)!,
+          ok: ms !== null,
+          latencyMs: ms,
+          err: ms === null ? err : '',
+        })
+      },
+      (d: number) => {
+        done = d
+        if (d === nodes.length || d % 5 === 0) say(`实测中 ${done}/${nodes.length}…`)
+      },
+    )
+  } finally {
+    // 不管上面怎么炸,进程必须收掉
+    await invoke('probe_stop').catch(() => {})
+  }
+
+  say('回传结果…')
+  const r = await reportChecks(settings, results)
+
+  return {
+    fetched: rows.length,
+    unparsable,
+    tested: results.length,
+    ok: results.filter((x) => x.ok).length,
+    round: r.round,
+    saved: r.saved,
+    skipped: r.skipped,
+  }
 }
