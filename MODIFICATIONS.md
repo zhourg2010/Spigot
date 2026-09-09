@@ -552,3 +552,62 @@ GitHub 产物服务的 403 —— 日志里文件已经找到、65MB 也传完�
 **"那 Windows 真挂了怎么办"** —— 由已有的 `fail_on_unmatched_files: true` 兜底:
 找不到 zip 就红着失败。那道检查本来是为"空 Release"加的,正好也能承担这件事,
 不用再写一层条件。仍然排除 `cancelled`:并发取消(有新构建顶上来)时不该发版。
+
+## 改动内容(2026-09-09):免费节点池的实测(第一步:链接解析 + 服务端通信)
+
+### 为什么验证在客户端做
+
+Deno Deploy 上没有代理内核,拨不了节点 —— 服务端只能记"这条链接长什么样",记不了
+"它现在还能不能用"。而免费节点是从公开仓库抓来的,**最常见的死法是凭据失效或被封,
+不是端口关闭**:服务器还在跑、端口还开着、TLS 还握手成功,但 uuid 早就作废了。
+所以"能不能用"只有真的拨一次才知道,而这台机器上正好有 mihomo。
+
+(所以也没做 TCP / TLS 层面的"可达性验证" —— 那种验证对上面这种死法完全无感,
+会给一个已经作废的节点打上"已验证",比没有标记更危险。)
+
+### 怎么让内核认识这些节点
+
+`delayProxyByName` 走的是 mihomo 的 `/proxies/{name}/delay`,**只能测配置里已经加载的
+节点**。免费池不在你的订阅里,所以得先塞进去。
+
+用的是 Clash Verge Rev 自带的 **`proxies` 类型 profile**:文件内容是
+`{prepend, append, delete}`,`enhance/seq.rs` 的 `use_seq` 会把 `append` 里的节点
+**追加**到运行时 `proxies` 列表(不是替换),`enhance_profiles` 让内核重载。
+这是上游的一等机制。
+
+排查过程中确认了一件重要的事:**普通 `merge` profile 不能用**。`enhance/merge.rs` 的
+`deep_merge` 对非 mapping 一律 `*a = b`,也就是写 `proxies:` 会把用户真正的节点
+**整个替换掉**。`merge.rs` 的测试夹具里出现了 `append-proxies`,但那只是夹具 ——
+实现里没有对应处理,而且那个测试根本没断言(`let _ = ...`)。真正处理 prepend/append 的
+是 `seq.rs`,只对 `rules` / `proxies` / `groups` 三种专用 profile 类型生效。
+
+**一个副作用:** `use_seq` 追加节点之后,还会把这些名字塞进第一个 selector 类型的策略组
+(seq.rs:92 起)。测试期间这批节点会出现在代理选择列表里 —— 不会被自动选中、不影响
+路由,但看着乱。测完清空 append 就没了。
+
+### 节点名用哈希,不用原名
+
+免费节点的名字是抓来的,什么字符都可能有(emoji、引号、换行),而且**极可能跟用户
+自己的节点重名** —— mihomo 遇到重名会拒绝加载整份配置。所以一律改名成
+`chk-<uriHash 前 12 位>`:不可能撞、不可能坏 YAML,测完还能凭名字直接映射回 uri_hash
+传给服务端,不用另外维护一张表。
+
+### 这一步做了什么
+
+`src/services/free-pool.ts`:
+
+- `parseShareUri()` —— 分享链接 → Clash 节点对象,**是 deno-push.ts 里 `toShareUri`
+  的逆运算**,字段映射刻意一一对应
+- `checkName()` / `hashOfCheckName()` —— 测试名字与 uri_hash 的双向映射
+- `fetchFreePool()` / `reportChecks()` —— 跟 `/free/pool` 和 `/free/verify` 通信
+
+**测试 24 项全过**,其中最重要的是**往返一致**:7 种协议组合(含 reality、ws、grpc、
+中文 emoji 名字)经 `toShareUri` → `parseShareUri` 之后关键字段完全一致。
+两边对不上的话,"推给家人的"和"测过的"就不是同一个东西 —— 那种错不报任何异常,
+只表现为"明明测通了家人却连不上",极难往这上面想。
+
+另外 14 条钉的是**坏输入必须返回 null**:端口越界、reality 缺公钥、vmess 缺 add……
+硬塞一个残缺的进去,得到的是永远连不上的节点,而它会被记成"测过了,不通" ——
+那是在污染数据,不是在测试。
+
+**还没做:** 注入 profile、逐个拨、进度界面。下一步。
