@@ -17,13 +17,23 @@
 
 ## 发一个新版本
 
-**版本号由 tag 决定,不用手改任何文件。** 在 Actions 里跑「构建 Spigot」,
-勾上 `release`,`tag` 填 `v1.0.1`(下一个版本号)。构建时 CI 会把这个值写进
-`package.json` / `Cargo.toml` / `tauri.conf.json`,于是:
+在 Actions 里跑「构建 Spigot」,勾上 `release`,`tag` **保持默认的 `auto`** —— 
+版本号会在上一个正式版基础上自动 +1,你什么都不用想也不用改。
 
-    tag v1.0.1  →  Spigot_1.0.1_x64_portable.zip  →  应用里显示 1.0.1
+| `tag` 填什么 | 结果 |
+|---|---|
+| `auto`(默认) | 上一个正式 Release 的补丁号 +1。`v1.0.0` → `v1.0.1` |
+| `v1.1.0` | 用这个。要跨小版本 / 大版本时才需要手填 |
+| 留空 | 不发正式版,出一个 `dev-<运行号>` 预发布 |
+
+定下来的版本号会被写进 `package.json` / `Cargo.toml` / `tauri.conf.json`,于是:
+
+    v1.0.1  →  Spigot_1.0.1_x64_portable.zip  →  应用里显示 1.0.1
 
 三者不可能对不上。仓库里 `package.json` 那个版本号只是开发时的默认值。
+
+自动递增只看**正式** Release(`/releases/latest` 本来就跳过 prerelease),
+所以那些 `dev-N` 的开发构建不会把版本号顶上去。
 
 这么做的理由:版本号写在三个文件里,而 zip 文件名是从 `package.json` 拼的。
 靠人记得发版前手动改三处,忘一次就是两个同名的包 —— `v2.5.4-r1` 和 `v2.5.4-r2`

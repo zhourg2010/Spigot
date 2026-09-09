@@ -30,9 +30,9 @@ on:
         type: boolean
         default: false
       tag:
-        description: '版本号(如 v1.0.0)。留空则发成 dev-<运行号> 的预发布'
+        description: "版本号。auto = 在上一个正式版基础上 +1(推荐);填 vX.Y.Z 则用这个;留空发成 dev-<运行号> 预发布"
         type: string
-        default: ''
+        default: 'auto'
 
 # 同一分支上新的提交会取消还在跑的旧构建,免得排队浪费额度
 concurrency:
@@ -43,6 +43,42 @@ permissions:
   contents: write # 发 Release 需要
 
 jobs:
+  # 定这次构建用哪个版本号。**单独一个 job 算一次**,build 和 release 都用它的输出 ——
+  # 两边各算一次的话,万一中间有人发了个 Release,两边就会算出不同的值,而那种错
+  # 排查起来极其费劲(包名和 Release 名对不上,但两处代码看着都对)。
+  #
+  # 三种情况:
+  #   打了 tag 推上来        → 就用那个 tag
+  #   手动跑,tag = auto      → 上一个正式 Release 的补丁号 +1(dev 预发布不算在内)
+  #   手动跑,tag = vX.Y.Z    → 用这个(要跨小版本/大版本时手动指定)
+  #   手动跑,tag 留空        → 空,表示这是个开发构建,不改版本号也不发正式版
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: pick
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          IN_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          elif [ -z "$IN_TAG" ]; then
+            TAG=""
+          elif [ "$IN_TAG" = "auto" ]; then
+            TAG="$(node scripts/next-version.mjs)"
+          else
+            TAG="$IN_TAG"
+          fi
+          echo "这次构建的版本号:${TAG:-(开发构建,不改版本号)}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   # 前端单元测试。**以前没有这个 job** —— 仓库里一直有 vitest 套件(含
   # deno-push 的推送筛选逻辑),但没有任何东西跑它,等于白写。
   #
@@ -69,6 +105,7 @@ jobs:
       - run: pnpm test
 
   build:
+    needs: version
     strategy:
       # 一个平台挂掉不影响其他平台继续出包
       fail-fast: false
@@ -177,8 +214,8 @@ jobs:
       #
       # release-version.mjs 是上游自带的(它就是干这个的),之前只是没人调。
       - name: 用 tag 定版本号
-        if: github.ref_type == 'tag' || inputs.tag != ''
-        run: pnpm release-version ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        if: needs.version.outputs.tag != ''
+        run: pnpm release-version ${{ needs.version.outputs.tag }}
 
       # prebuild 按目标平台下载 mihomo 内核(sidecar)。不跑这步的话
       # tauri 打包时会因为找不到 externalBin 里声明的 verge-mihomo 而失败。
@@ -238,7 +275,7 @@ jobs:
   release:
     # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布
     if: startsWith(github.ref, 'refs/tags/v') || inputs.release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -253,7 +290,7 @@ jobs:
       - name: 检查这个版本号是不是已经发过
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           if [ -z "$TAG" ]; then
             echo "没有 tag(开发构建),跳过检查"
@@ -294,12 +331,12 @@ jobs:
           # 中间那条是为了绕开一个现实限制:某些环境下有推分支的权限、没有推 tag 的权限
           # (git push tag 直接 403)。而 action-gh-release 会在指定 commit 上**自己创建
           # tag**,所以手动跑 + 填版本号,效果跟打 tag 完全一样,不需要额外权限。
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('dev-{0}', github.run_number) }}
+          tag_name: ${{ needs.version.outputs.tag || format('dev-{0}', github.run_number) }}
           # 这一行**必须加引号**。里面的 "构建 #{0}" 有个空格加井号,YAML 会把 ` #` 之后的
           # 内容当成注释整段吃掉,只剩下 "...format('(开发构建" —— 一个没闭合的表达式。
           # GitHub 解析不了这个表达式,会判整个工作流无效:所有触发方式一律不跑,直接
           # startup_failure(连 jobs 都不创建)。这个 workflow 曾经连红 14 次就是它。
-          name: "Spigot ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || format('(开发构建 #{0})', github.run_number) }}"
+          name: "Spigot ${{ needs.version.outputs.tag || format('(开发构建 #{0})', github.run_number) }}"
           body: |
             **Spigot** —— 基于 Clash Verge Rev 修改，左边导航栏最下面多了一页 **Deno Push**，
             一键把测过、延迟达标的美国节点推给自建的 Deno 订阅服务。
@@ -321,4 +358,4 @@ jobs:
           draft: false
           # 只有"既不是 tag、也没填版本号"的开发构建才算预发布。
           # 手动跑但填了版本号的,跟打 tag 一样是正式发布。
-          prerelease: ${{ github.ref_type != 'tag' && inputs.tag == '' }}
+          prerelease: ${{ needs.version.outputs.tag == '' }}
