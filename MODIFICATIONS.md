@@ -536,3 +536,19 @@ Artifacts 里",捡得回来。
 验证:`release-version.mjs v1.0.1` 在本地真跑过一遍(临时装了它依赖的 commander),
 三处全部改成 `1.0.1`、`v` 前缀正确剥掉;重复版本号的判断拿真实 GitHub API 试过
 —— 已存在的 tag 返回 200(拦下),没发过的返回 404(放行)。
+
+### `release` 不再被无关平台的失败卡住
+
+Release 里**只有 Windows 便携版 zip** —— macOS 的 dmg、Linux 的 deb/rpm 都只躺在
+Artifacts 里。但 `release` 是 `needs: build`,矩阵里任何一条腿失败,整个 build 就算失败,
+release 被跳过。
+
+真发生过一次(2026-09-08,v1.0.0 那轮):macOS ARM 那条腿在**上传产物的最后一步**撞上
+GitHub 产物服务的 403 —— 日志里文件已经找到、65MB 也传完了,挂在 `FinalizeArtifact`。
+于是一个跟 Release 内容毫无关系的产物,把 Windows 的包卡住了,得手动重跑那条腿。
+
+改法:`release` 加 `always()`,不再因为别的平台失败而跳过。
+
+**"那 Windows 真挂了怎么办"** —— 由已有的 `fail_on_unmatched_files: true` 兜底:
+找不到 zip 就红着失败。那道检查本来是为"空 Release"加的,正好也能承担这件事,
+不用再写一层条件。仍然排除 `cancelled`:并发取消(有新构建顶上来)时不该发版。

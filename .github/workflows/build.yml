@@ -273,8 +273,20 @@ jobs:
           retention-days: 30
 
   release:
-    # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+    # 只有打了 v* 的 tag,或者手动跑时勾了 release,才发布。
+    #
+    # **加 always() 是有原因的。** 默认情况下 build 里任何一条矩阵腿失败,整个 build
+    # 就算失败,release 被跳过。但 Release 里**只有 Windows 便携版 zip** —— macOS 的
+    # dmg、Linux 的 deb/rpm 都只躺在 Artifacts 里。真发生过一次:macOS ARM 那条腿在
+    # 上传产物的最后一步撞上 GitHub 产物服务的 403(文件已经传完 65MB,挂在 finalize),
+    # 于是一个跟 Release 内容毫无关系的产物,把 Windows 的包卡住了。
+    #
+    # 那"Windows 真的挂了怎么办"?——**由 fail_on_unmatched_files: true 兜底**:
+    # 找不到 zip 就红着失败。那道检查本来就是为"空 Release"加的,正好也能承担这件事,
+    # 不用再写一层条件。
+    #
+    # 仍然排除 cancelled:并发取消(有新构建顶上来)时不该发版。
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.release) && needs.version.result == 'success' && needs.build.result != 'cancelled'
     needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
