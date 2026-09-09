@@ -794,6 +794,15 @@ export interface NodeRow {
   reach?: Record<string, number>
 }
 
+/**
+ * 这个节点推不推得了。**唯一的判据是转不转得出分享链接** —— 转不出来的推过去
+ * 就是一行空的,家人那边少一个节点还看不出为什么。
+ *
+ * 放在这儿而不是表格组件里:它是关于 NodeRow 的纯判断,页面和表格都要用;
+ * 而且组件文件里混着导出非组件的东西会让 React Fast Refresh 对整个文件失效。
+ */
+export const pushable = (r: NodeRow) => !!r.uri
+
 export interface ScanResult {
   rows: NodeRow[]
   /** GeoIP 库能不能用。用不了的话所有 cc 都是 null */

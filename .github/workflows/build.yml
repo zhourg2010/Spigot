@@ -105,6 +105,9 @@ jobs:
       # 类型检查。build 里的 web:build 也会跑 tsc,但那要等二十分钟的 Rust 编译,
       # 而且四个平台各报一遍同一个错。放在这儿一分钟就知道。
       - run: pnpm typecheck
+      # lint 的门槛是 --max-warnings=0(见 package.json)。以前没进 CI,结果就是
+      # 攒了几条没人看见的告警 —— 现在 src 是干净的,进 CI 才能一直保持干净。
+      - run: pnpm lint
       - run: pnpm test
 
   build:

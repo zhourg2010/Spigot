@@ -27,11 +27,11 @@
  * ResizeObserver,而我们的行高是常量,量了也白量。
  */
 
-import { useVirtualizer } from '@tanstack/react-virtual'
 import { useTheme } from '@mui/material/styles'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { memo, useCallback, useMemo, useRef } from 'react'
 
-import { type NodeRow, REACH_TARGETS } from '@/services/deno-push'
+import { type NodeRow, pushable, REACH_TARGETS } from '@/services/deno-push'
 
 /** 行高(px)。改这个值要同步改 ROW_STYLE 的 height。 */
 const ROW_H = 32
@@ -47,8 +47,6 @@ const MIN_W = 780
  * ResizeObserver,窗口一变它就知道 —— 再自己加一个 resize 监听是重复劳动。
  */
 const VIEWPORT_H = 'clamp(240px, calc(100vh - 430px), 900px)'
-
-export const pushable = (r: NodeRow) => !!r.uri
 
 // —— 样式对象全部提到模块级。每次渲染新建对象的话,React 每帧都要重新 diff 一遍 style。
 

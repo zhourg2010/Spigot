@@ -40,7 +40,7 @@ import {
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 
 import { BasePage } from '@/components/base'
-import NodeTable, { pushable } from '@/components/deno-push/node-table'
+import NodeTable from '@/components/deno-push/node-table'
 import {
   carryOverReach,
   DEFAULT_SETTINGS,
@@ -49,6 +49,7 @@ import {
   loadSettings,
   type NodeRow,
   pickForPush,
+  pushable,
   fetchRemotePool,
   nameOfUri,
   type PushReport,
@@ -78,7 +79,7 @@ const DenoPushPage = () => {
   const [report, setReport] = useState<PushReport | null>(null)
 
   // 勾选状态按**节点名**存,不是按下标 —— 重新扫描之后顺序会变,存下标等于选错节点。
-  const [chosen, setChosen] = useState<Set<string>>(new Set())
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set())
 
   const [kw, setKw] = useState('')
   const [cc, setCc] = useState('ALL')
@@ -145,16 +146,21 @@ const DenoPushPage = () => {
    * 服务器上那批也可能有几百行。不 memo 的话它会跟着整页一起重建 ——
    * 包括**每敲一个搜索字符**,而那跟这个面板毫无关系。
    */
-  const remoteList = useMemo(
-    () =>
-      remote?.nodes.map((n, i) => (
-        <div key={i} style={n.disabled ? DIM : undefined}>
+  const remoteList = useMemo(() => {
+    // 用链接本身当 key,不用下标。池子里理论上可以有两条一模一样的链接
+    // (后台是手工编辑的),所以重复的补个序号 —— 重复的 key 会让 React 复用错行。
+    const seen = new Map<string, number>()
+    return remote?.nodes.map((n) => {
+      const nth = (seen.get(n.uri) ?? 0) + 1
+      seen.set(n.uri, nth)
+      return (
+        <div key={nth === 1 ? n.uri : `${n.uri}#${nth}`} style={n.disabled ? DIM : undefined}>
           {n.disabled ? '[停用] ' : ''}
           {nameOfUri(n.uri) || n.uri.slice(0, 60)}
         </div>
-      )),
-    [remote],
-  )
+      )
+    })
+  }, [remote])
   const chosenRows = useMemo(() => rows.filter((r) => chosen.has(r.name) && pushable(r)), [rows, chosen])
 
   // ---------------- 动作 ----------------
